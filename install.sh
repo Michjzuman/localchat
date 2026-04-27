@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+#
+# localchat installer.
+#
+# Downloads sources from GitHub, compiles, installs to /usr/local, and
+# enables the localchatd systemd service. Usage:
+#
+#   curl -fsSL https://raw.githubusercontent.com/michjzuman/localchat/main/install.sh | sudo bash
+#
+# Environment overrides:
+#   GITHUB_USER, GITHUB_REPO, GITHUB_BRANCH, RAW_BASE
+#   INSTALL_BIN, INSTALL_SBIN, SERVICE_FILE
+#   LOCAL_SOURCE=1     Build from the current working directory instead of
+#                      downloading sources (useful for development).
 
 set -euo pipefail
 
@@ -13,6 +26,10 @@ RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_
 INSTALL_BIN="${INSTALL_BIN:-/usr/local/bin}"
 INSTALL_SBIN="${INSTALL_SBIN:-/usr/local/sbin}"
 SERVICE_FILE="${SERVICE_FILE:-/etc/systemd/system/localchatd.service}"
+LEGACY_SOCKET="/run/localchat.sock"
+
+LOCAL_SOURCE="${LOCAL_SOURCE:-0}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TMP_DIR=""
 
@@ -32,37 +49,26 @@ print_dependency_hint() {
 
 Required packages:
   Debian/Ubuntu: sudo apt install build-essential curl libncurses-dev
-  Fedora:        sudo dnf install gcc curl ncurses-devel
+  Fedora:        sudo dnf install gcc make curl ncurses-devel
   RHEL/CentOS:   sudo yum install gcc make curl ncurses-devel
   Arch:          sudo pacman -S base-devel curl ncurses
 EOF
 }
 
-has_ncurses() {
-    local test_file
-    local test_bin
-
-    if ! command -v gcc >/dev/null 2>&1; then
-        return 1
-    fi
-
-    test_file="$(mktemp)"
-    test_bin="$(mktemp)"
-
-    cat > "$test_file" <<'EOF'
+has_ncursesw() {
+    if ! command -v gcc >/dev/null 2>&1; then return 1; fi
+    local src bin rc
+    src="$(mktemp)"
+    bin="$(mktemp)"
+    cat > "$src" <<'EOF'
+#define _XOPEN_SOURCE_EXTENDED 1
 #include <ncurses.h>
-int main(void) {
-    initscr();
-    endwin();
-    return 0;
-}
+int main(void){ initscr(); endwin(); return 0; }
 EOF
-
-    gcc -x c "$test_file" -o "$test_bin" -lncurses >/dev/null 2>&1
-    local ok=$?
-
-    rm -f "$test_file" "$test_bin"
-    return "$ok"
+    gcc -x c "$src" -o "$bin" -lncursesw >/dev/null 2>&1
+    rc=$?
+    rm -f "$src" "$bin"
+    return "$rc"
 }
 
 install_dependencies() {
@@ -86,13 +92,13 @@ install_dependencies() {
 ensure_dependencies() {
     local needs_install=0
 
-    for command_name in gcc curl install mktemp; do
-        if ! command -v "$command_name" >/dev/null 2>&1; then
+    for cmd in gcc curl install mktemp make; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
             needs_install=1
         fi
     done
 
-    if ! has_ncurses; then
+    if ! has_ncursesw; then
         needs_install=1
     fi
 
@@ -101,78 +107,82 @@ ensure_dependencies() {
         install_dependencies
     fi
 
-    for command_name in gcc curl install mktemp; do
-        if ! command -v "$command_name" >/dev/null 2>&1; then
-            echo "Missing command after dependency installation: $command_name" >&2
+    for cmd in gcc curl install mktemp make; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            echo "Missing command after dependency installation: $cmd" >&2
             print_dependency_hint
             exit 1
         fi
     done
 
-    if ! has_ncurses; then
-        echo "ncurses headers or libraries are missing after dependency installation." >&2
+    if ! has_ncursesw; then
+        echo "ncursesw is missing after dependency installation." >&2
         print_dependency_hint
         exit 1
     fi
 }
 
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    die "Run this script with sudo/root, for example: curl -fsSL ${RAW_BASE}/install.sh | sudo bash"
+    die "Run this script with sudo/root, e.g. curl -fsSL ${RAW_BASE}/install.sh | sudo bash"
 fi
 
 if [ "$(uname -s)" != "Linux" ]; then
     die "localchat requires Linux, systemd, and SO_PEERCRED."
 fi
 
-trap cleanup EXIT
-
-echo "[1/5] Checking dependencies..."
-
-ensure_dependencies
-
 if ! command -v systemctl >/dev/null 2>&1; then
     die "systemctl was not found. localchat needs a Linux system with systemd."
 fi
 
+trap cleanup EXIT
+
+echo "[1/6] Checking dependencies..."
+ensure_dependencies
+
 TMP_DIR="$(mktemp -d)"
 cd "$TMP_DIR"
 
-echo "[2/5] Downloading source files..."
+echo "[2/6] Fetching sources..."
+if [ "$LOCAL_SOURCE" = "1" ]; then
+    cp "$SCRIPT_DIR/localchatd.c" .
+    cp "$SCRIPT_DIR/localchat.c" .
+    cp "$SCRIPT_DIR/Makefile" .
+    cp "$SCRIPT_DIR/localchatd.service" .
+else
+    curl -fsSL "${RAW_BASE}/localchatd.c"        -o localchatd.c
+    curl -fsSL "${RAW_BASE}/localchat.c"         -o localchat.c
+    curl -fsSL "${RAW_BASE}/Makefile"            -o Makefile
+    curl -fsSL "${RAW_BASE}/localchatd.service"  -o localchatd.service
+fi
 
-curl -fsSL "${RAW_BASE}/localchatd.c" -o localchatd.c
-curl -fsSL "${RAW_BASE}/localchat.c" -o localchat.c
+echo "[3/6] Compiling..."
+make clean >/dev/null 2>&1 || true
+make all
 
-echo "[3/5] Compiling..."
+echo "[4/6] Stopping existing service (if any)..."
+systemctl stop localchatd >/dev/null 2>&1 || true
 
-gcc -Wall -Wextra -O2 localchatd.c -o "$SERVER_NAME"
-gcc -Wall -Wextra -O2 localchat.c -o "$APP_NAME" -pthread -lncurses
-
-echo "[4/5] Installing files..."
-
+echo "[5/6] Installing files..."
 install -d -m 755 "$INSTALL_BIN" "$INSTALL_SBIN" "$(dirname "$SERVICE_FILE")"
 install -m 755 "$SERVER_NAME" "$INSTALL_SBIN/$SERVER_NAME"
-install -m 755 "$APP_NAME" "$INSTALL_BIN/$APP_NAME"
+install -m 755 "$APP_NAME"    "$INSTALL_BIN/$APP_NAME"
+install -m 644 localchatd.service "$SERVICE_FILE"
 
-cat > "$SERVICE_FILE" <<EOF
-[Unit]
-Description=localchat server
-After=network.target
+# Remove the legacy socket from previous installs.
+rm -f "$LEGACY_SOCKET" || true
 
-[Service]
-Type=simple
-ExecStart=$INSTALL_SBIN/$SERVER_NAME
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-echo "[5/5] Starting service..."
-
+echo "[6/6] Enabling service..."
 systemctl daemon-reload
 systemctl enable localchatd
 systemctl restart localchatd
+
+# Briefly verify the service came up.
+sleep 0.3
+if ! systemctl is-active --quiet localchatd; then
+    echo
+    echo "Warning: localchatd is not active. Check logs with:" >&2
+    echo "  journalctl -u localchatd --no-pager -n 50" >&2
+fi
 
 echo
 echo "Done."

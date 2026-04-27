@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev python3
+
+      - name: build
+        run: make all
+
+      - name: syntax / lint
+        run: make check
+
+      - name: smoke test
+        run: bash tests/smoke.sh
+
+      - name: install.sh local-source check
+        run: |
+          # Verify install.sh syntax + that LOCAL_SOURCE=1 picks up local files.
+          bash -n install.sh

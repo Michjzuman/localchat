@@ -1,16 +1,17 @@
 # localchat
 
 localchat is a small terminal chat for Linux multi-user systems. A systemd
-service (`localchatd`) runs in the background, provides the Unix domain socket
-`/run/localchat.sock`, and identifies connected users by their real UID
-(`SO_PEERCRED`). The `localchat` client connects to the socket and shows a
-simple ncurses TUI.
+service (`localchatd`) runs in the background, provides the Unix domain
+socket `/run/localchat/socket`, and identifies connected users by their real
+UID via `SO_PEERCRED`. The `localchat` client connects to the socket and
+shows an ncursesw TUI with chat bubbles.
 
 ## Requirements
 
 - Linux with systemd
-- supported package manager (`apt-get`, `dnf`, `yum`, or `pacman`)
-- root privileges for installation and service setup
+- A supported package manager (`apt-get`, `dnf`, `yum`, or `pacman`)
+- A UTF-8 locale (the client renders with wide characters)
+- Root privileges for installation and service setup
 
 ## Installation
 
@@ -18,34 +19,44 @@ simple ncurses TUI.
 curl -fsSL https://raw.githubusercontent.com/michjzuman/localchat/main/install.sh | sudo bash
 ```
 
-The script installs missing build dependencies, downloads `localchat.c` and
-`localchatd.c`, compiles both programs, installs the client to
-`/usr/local/bin/localchat`, installs the server to `/usr/local/sbin/localchatd`,
-and creates the `localchatd.service` systemd unit.
+The script installs missing build dependencies, downloads the sources,
+compiles both binaries, installs the client to `/usr/local/bin/localchat`,
+the server to `/usr/local/sbin/localchatd`, and the hardened
+`localchatd.service` unit. The systemd unit creates `/run/localchat/`
+automatically (`RuntimeDirectory=`) and the daemon places the socket there.
 
-Repository, branch, and target paths can be overridden with environment
-variables when needed:
+Override repository, branch, or target paths via environment variables:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/michjzuman/localchat/main/install.sh \
   | sudo GITHUB_BRANCH=main INSTALL_BIN=/usr/local/bin bash
 ```
 
+To install from a local checkout (development):
+
+```sh
+sudo LOCAL_SOURCE=1 bash install.sh
+```
+
 ## Manual Build
 
 ```sh
-gcc -Wall -Wextra -O2 localchatd.c -o localchatd
-gcc -Wall -Wextra -O2 localchat.c -o localchat -pthread -lncurses
+make
+sudo make install
+sudo install -m 644 localchatd.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now localchatd
 ```
 
 ## Usage
 
-After installation, the server runs as a systemd service:
+After installation the server runs as a systemd service:
 
 ```sh
 sudo systemctl status localchatd
 sudo systemctl restart localchatd
 sudo systemctl stop localchatd
+journalctl -u localchatd -f
 ```
 
 Start the chat as a normal user:
@@ -54,21 +65,81 @@ Start the chat as a normal user:
 localchat
 ```
 
-All users on the same system who start `localchat` join the same local chat.
+All users on the same system who run `localchat` share one chat room.
 
-## Current State
+### Keys
 
-- server with `poll()` support for up to 64 clients
-- UID-based user identification via `SO_PEERCRED`
-- broadcast messages and join/leave events
-- ncurses client with bubble-style messages and a boxed input bar
-- Python prototype `design.py` as the visual reference for the chat layout
+| Key                | Action                       |
+|--------------------|------------------------------|
+| Enter              | send message                 |
+| ←/→                | move cursor                  |
+| Home / End         | start / end of input         |
+| Backspace / Del    | edit                         |
+| Ctrl-W             | delete previous word         |
+| Ctrl-U / Ctrl-K    | clear input / kill to EOL    |
+| Ctrl-L             | redraw                       |
+| PgUp / PgDn        | scroll back / forward        |
+| Ctrl-C / Ctrl-D    | quit                         |
 
-## Open Tasks
+### Command-line
 
-- more robust error handling for partial writes, `SIGPIPE`, `POLLHUP`, and
-  socket disconnects
-- explicit message framing instead of raw stream reads
-- optional chat history and scrollback in the client
-- UTF-8 support through ncursesw/wide chars
-- tests and Linux CI for builds and baseline behavior
+```text
+localchat [--socket PATH] [--version] [--help]
+localchat uninstall              # remove binaries + systemd unit (root)
+
+localchatd [--socket PATH] [--version] [--help]
+```
+
+`--socket` is useful for ad-hoc / test setups, e.g. running a daemon on a
+non-default path:
+
+```sh
+localchatd -s /tmp/lc.sock &
+localchat  -s /tmp/lc.sock
+```
+
+## Protocol
+
+A trivial length-prefixed framing on a Unix domain socket:
+
+```
++--------+--------------------+
+| u32 BE | payload (UTF-8)    |
+| length | up to 8192 bytes   |
++--------+--------------------+
+```
+
+Server-to-client payloads are formatted as `[username] body` for chat
+messages and `[system] body` for notifications. Client-to-server payloads
+are the raw message body (max 4096 bytes). The server prefixes with the
+user's name (resolved from `SO_PEERCRED` + `getpwuid`) and broadcasts to
+all connected clients.
+
+## Tests
+
+```sh
+make test         # builds the daemon, runs tests/smoke.sh
+```
+
+The smoke test starts a daemon on a temporary socket, runs a small C
+client to verify welcome + echo framing, and checks that oversized
+messages get the client dropped.
+
+## Service Hardening
+
+`localchatd.service` runs the daemon with `NoNewPrivileges`,
+`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+`MemoryDenyWriteExecute`, `RestrictAddressFamilies=AF_UNIX`, and an empty
+capability bounding set. The socket lives in `/run/localchat/` (created
+by systemd as a `RuntimeDirectory`) with mode `0666` so any user on the
+system can connect.
+
+## Limitations
+
+- Linux only (uses `SO_PEERCRED`).
+- Bubble rendering assumes a UTF-8 terminal that supports box-drawing
+  characters.
+- Scrollback is limited to the last ~1024 messages of the current session.
+- No persistent history across daemon restarts.
+- Resizing the terminal re-renders from in-memory log; older messages may
+  be lost if more than ~1024 messages have arrived.
