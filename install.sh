@@ -41,10 +41,10 @@ curl -fsSL "https://raw.githubusercontent.com/DEIN_USERNAME/localchat/main/local
 echo "[3/5] Kompiliere..."
 
 gcc localchatd.c -o "$SERVER_NAME"
-gcc localchat.c -o "$APP_NAME" -pthread
+gcc localchat.c -o "$APP_NAME" -pthread -lncurses
 
 echo "[4/5] Installiere Dateien..."
-
+ 
 install -m 755 "$SERVER_NAME" "$INSTALL_SBIN/$SERVER_NAME"
 install -m 755 "$APP_NAME" "$INSTALL_BIN/$APP_NAME"
 
