@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ncurses.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <signal.h>
+#include <stdint.h>
+#include <wchar.h>
 
 #define SOCKET_PATH "/run/localchat.sock"
 #define BUFFER_SIZE 1024
@@ -32,8 +37,47 @@ static void print_spaces(WINDOW *win, int count) {
     }
 }
 
+static ssize_t safe_write(int fd, const void *buf, size_t count) {
+    size_t total = 0;
+    const char *ptr = (const char *)buf;
+    while (total < count) {
+        ssize_t n = write(fd, ptr + total, count - total);
+        if (n == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1; // error
+        }
+        total += n;
+    }
+    return (ssize_t)total;
+}
+
 static int text_columns(const char *text) {
-    return (int)strlen(text);
+    // Compute display column width of a UTF-8 string using wcwidth.
+    // Fallback to byte length if conversion fails.
+    if (text == NULL) return 0;
+    // Determine required number of wide characters.
+    size_t wlen = mbstowcs(NULL, text, 0);
+    if (wlen == (size_t)-1) {
+        // Invalid multibyte sequence, fallback.
+        return (int)strlen(text);
+    }
+    // Allocate temporary wide buffer.
+    wchar_t *wbuf = (wchar_t *)malloc((wlen + 1) * sizeof(wchar_t));
+    if (!wbuf) {
+        return (int)strlen(text);
+    }
+    mbstowcs(wbuf, text, wlen + 1);
+    int cols = 0;
+    for (size_t i = 0; i < wlen; i++) {
+        int w = wcwidth(wbuf[i]);
+        if (w > 0) {
+            cols += w;
+        }
+    }
+    free(wbuf);
+    return cols;
 }
 
 static int max_message_columns(void) {
@@ -243,24 +287,67 @@ static void draw_input_box(const char *input, int cursor_index) {
 
 static void *receive_loop(void *arg) {
     (void)arg;
-    char buffer[BUFFER_SIZE];
+    uint32_t netlen;
+    char *msg_buf = NULL;
+    size_t buf_cap = 0;
     while (1) {
-        ssize_t n = read(sock_fd, buffer, BUFFER_SIZE - 1);
-        if (n <= 0) {
-            pthread_mutex_lock(&win_mutex);
-            render_system_message("[system] disconnected");
-            wrefresh(chat_win);
-            pthread_mutex_unlock(&win_mutex);
-            endwin();
-            exit(0);
+        // Read message length (network byte order)
+        size_t read_len = 0;
+        while (read_len < sizeof(netlen)) {
+            ssize_t n = read(sock_fd, ((char *)&netlen) + read_len, sizeof(netlen) - read_len);
+            if (n <= 0) {
+                goto disconnect;
+            }
+            read_len += n;
         }
-        buffer[n] = '\0';
+        uint32_t msg_len = ntohl(netlen);
+        // Sanity limit to avoid OOM (max 64 KiB)
+        if (msg_len > 65536) {
+            // discard oversized message
+            size_t to_skip = msg_len;
+            char discard[1024];
+            while (to_skip > 0) {
+                ssize_t n = read(sock_fd, discard, to_skip > sizeof(discard) ? sizeof(discard) : to_skip);
+                if (n <= 0) {
+                    goto disconnect;
+                }
+                to_skip -= n;
+            }
+            continue;
+        }
+        if (msg_len + 1 > buf_cap) {
+            free(msg_buf);
+            buf_cap = msg_len + 1;
+            msg_buf = malloc(buf_cap);
+            if (!msg_buf) {
+                goto disconnect;
+            }
+        }
+        size_t recvd = 0;
+        while (recvd < msg_len) {
+            ssize_t n = read(sock_fd, msg_buf + recvd, msg_len - recvd);
+            if (n <= 0) {
+                goto disconnect;
+            }
+            recvd += n;
+        }
+        msg_buf[msg_len] = '\0';
+        // Render the received message
         pthread_mutex_lock(&win_mutex);
-        render_received_text(buffer);
+        render_received_text(msg_buf);
         wrefresh(chat_win);
         pthread_mutex_unlock(&win_mutex);
     }
     return NULL;
+
+ disconnect:
+    pthread_mutex_lock(&win_mutex);
+    render_system_message("[system] disconnected");
+    wrefresh(chat_win);
+    pthread_mutex_unlock(&win_mutex);
+    endwin();
+    close(sock_fd);
+    exit(0);
 }
 
 int main(void) {
@@ -335,7 +422,10 @@ int main(void) {
         if (ch == '\n' || ch == '\r') {
             input[idx] = '\0';
             if (idx > 0) {
-                if (write(sock_fd, input, strlen(input)) == -1) {
+                size_t msg_len = strlen(input);
+                uint32_t netlen = htonl((uint32_t)msg_len);
+                if (safe_write(sock_fd, &netlen, sizeof(netlen)) == -1 ||
+                    safe_write(sock_fd, input, msg_len) == -1) {
                     pthread_mutex_lock(&win_mutex);
                     render_system_message("[system] failed to send message");
                     wrefresh(chat_win);
