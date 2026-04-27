@@ -1,18 +1,18 @@
 # LocalChat
 
-LocalChat ist ein kleiner Terminal-Chat fuer Linux-Mehrbenutzersysteme. Ein
-systemd-Dienst (`localchatd`) laeuft im Hintergrund, stellt den Unix-Domain-
-Socket `/run/localchat.sock` bereit und identifiziert verbundene Benutzer ueber
-ihre echte UID (`SO_PEERCRED`). Der Client `localchat` verbindet sich mit dem
-Socket und zeigt eine einfache ncurses-TUI.
+LocalChat is a small terminal chat for Linux multi-user systems. A systemd
+service (`localchatd`) runs in the background, provides the Unix domain socket
+`/run/localchat.sock`, and identifies connected users by their real UID
+(`SO_PEERCRED`). The `localchat` client connects to the socket and shows a
+simple ncurses TUI.
 
-## Voraussetzungen
+## Requirements
 
-- Linux mit systemd
+- Linux with systemd
 - `gcc`
 - `curl`
-- ncurses-Entwicklungspaket (`libncurses-dev`, `ncurses-devel` oder `ncurses`)
-- root-Rechte fuer Installation und Service-Setup
+- ncurses development package (`libncurses-dev`, `ncurses-devel`, or `ncurses`)
+- root privileges for installation and service setup
 
 ## Installation
 
@@ -20,29 +20,28 @@ Socket und zeigt eine einfache ncurses-TUI.
 curl -fsSL https://raw.githubusercontent.com/michjzuman/localchat/main/install.sh | sudo bash
 ```
 
-Das Skript laedt `localchat.c` und `localchatd.c`, kompiliert beide Programme,
-installiert den Client nach `/usr/local/bin/localchat`, den Server nach
-`/usr/local/sbin/localchatd` und richtet den systemd-Service
-`localchatd.service` ein.
+The script downloads `localchat.c` and `localchatd.c`, compiles both programs,
+installs the client to `/usr/local/bin/localchat`, installs the server to
+`/usr/local/sbin/localchatd`, and creates the `localchatd.service` systemd unit.
 
-Repository, Branch und Zielpfade koennen bei Bedarf per Umgebungsvariable
-ueberschrieben werden:
+Repository, branch, and target paths can be overridden with environment
+variables when needed:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/michjzuman/localchat/main/install.sh \
   | sudo GITHUB_BRANCH=main INSTALL_BIN=/usr/local/bin bash
 ```
 
-## Manuell bauen
+## Manual Build
 
 ```sh
 gcc -Wall -Wextra -O2 localchatd.c -o localchatd
 gcc -Wall -Wextra -O2 localchat.c -o localchat -pthread -lncurses
 ```
 
-## Nutzung
+## Usage
 
-Nach der Installation laeuft der Server als systemd-Service:
+After installation, the server runs as a systemd service:
 
 ```sh
 sudo systemctl status localchatd
@@ -50,28 +49,27 @@ sudo systemctl restart localchatd
 sudo systemctl stop localchatd
 ```
 
-Den Chat startest du als normaler Benutzer:
+Start the chat as a normal user:
 
 ```sh
 localchat
 ```
 
-Alle Benutzer auf demselben System, die `localchat` starten, landen im gleichen
-lokalen Chat.
+All users on the same system who start `localchat` join the same local chat.
 
-## Aktueller Stand
+## Current State
 
-- Server mit `poll()` fuer bis zu 64 Clients
-- UID-basierte Benutzererkennung per `SO_PEERCRED`
-- Broadcast-Nachrichten und Join/Leave-Events
-- ncurses-Client mit Nachrichtenfenster und Eingabeleiste
-- Python-Prototyp `design.py` als visuelle Referenz fuer Chat-Bubbles
+- server with `poll()` support for up to 64 clients
+- UID-based user identification via `SO_PEERCRED`
+- broadcast messages and join/leave events
+- ncurses client with a message window and input bar
+- Python prototype `design.py` as a visual reference for chat bubbles
 
-## Offene Punkte
+## Open Tasks
 
-- robustere Fehlerbehandlung fuer Partial Writes, `SIGPIPE`, `POLLHUP` und
-  Socket-Abbrueche
-- klares Message-Framing statt roher Stream-Reads
-- optionaler Chatverlauf und Scrollback im Client
-- UTF-8-Unterstuetzung ueber ncursesw/wide chars
-- Tests und Linux-CI fuer Build und Basisverhalten
+- more robust error handling for partial writes, `SIGPIPE`, `POLLHUP`, and
+  socket disconnects
+- explicit message framing instead of raw stream reads
+- optional chat history and scrollback in the client
+- UTF-8 support through ncursesw/wide chars
+- tests and Linux CI for builds and baseline behavior

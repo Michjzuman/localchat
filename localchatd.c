@@ -98,7 +98,7 @@ int main(void) {
         return 1;
     }
 
-    printf("localchatd läuft auf %s\n", SOCKET_PATH);
+    printf("localchatd running on %s\n", SOCKET_PATH);
 
     while (1) {
         struct pollfd fds[MAX_CLIENTS + 1];
