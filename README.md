@@ -1,6 +1,6 @@
-# LocalChat
+# localchat
 
-LocalChat is a small terminal chat for Linux multi-user systems. A systemd
+localchat is a small terminal chat for Linux multi-user systems. A systemd
 service (`localchatd`) runs in the background, provides the Unix domain socket
 `/run/localchat.sock`, and identifies connected users by their real UID
 (`SO_PEERCRED`). The `localchat` client connects to the socket and shows a

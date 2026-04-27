@@ -76,7 +76,7 @@ if [ "${EUID:-$(id -u)}" -ne 0 ]; then
 fi
 
 if [ "$(uname -s)" != "Linux" ]; then
-    die "LocalChat requires Linux, systemd, and SO_PEERCRED."
+    die "localchat requires Linux, systemd, and SO_PEERCRED."
 fi
 
 trap cleanup EXIT
@@ -111,7 +111,7 @@ install -m 755 "$APP_NAME" "$INSTALL_BIN/$APP_NAME"
 
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=LocalChat server
+Description=localchat server
 After=network.target
 
 [Service]
