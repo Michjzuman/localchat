@@ -61,8 +61,8 @@ All users on the same system who start `localchat` join the same local chat.
 - server with `poll()` support for up to 64 clients
 - UID-based user identification via `SO_PEERCRED`
 - broadcast messages and join/leave events
-- ncurses client with a message window and input bar
-- Python prototype `design.py` as a visual reference for chat bubbles
+- ncurses client with bubble-style messages and a boxed input bar
+- Python prototype `design.py` as the visual reference for the chat layout
 
 ## Open Tasks
 
