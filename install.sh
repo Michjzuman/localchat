@@ -29,7 +29,17 @@ SERVICE_FILE="${SERVICE_FILE:-/etc/systemd/system/localchatd.service}"
 LEGACY_SOCKET="/run/localchat.sock"
 
 LOCAL_SOURCE="${LOCAL_SOURCE:-0}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# When run via `curl ... | sudo bash` there is no source file on disk and
+# BASH_SOURCE[0] is unset; only resolve SCRIPT_DIR when actually needed.
+SCRIPT_DIR=""
+if [ "$LOCAL_SOURCE" = "1" ]; then
+    if [ -n "${BASH_SOURCE[0]:-}" ]; then
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    else
+        SCRIPT_DIR="$(pwd)"
+    fi
+fi
 
 TMP_DIR=""
 
