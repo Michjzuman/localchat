@@ -17,6 +17,7 @@
 
 #define SOCKET_PATH "/run/localchat.sock"
 #define BUFFER_SIZE 1024
+#define VERSION "1.0"
 #define USERNAME_SIZE 64
 
 static int sock_fd;
@@ -350,7 +351,43 @@ static void *receive_loop(void *arg) {
     exit(0);
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
+    // Command‑line options handling
+    if (argc > 1) {
+        if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+            printf("localchat %s\n", VERSION);
+            printf("Terminal chat client for localchat daemon.\n");
+            printf("\n");
+            printf("Usage: localchat [OPTION]\n");
+            printf("\n");
+            printf("Options:\n");
+            printf("  --help, -h          Show this help message and exit.\n");
+            printf("  uninstall           Uninstall localchat (requires root).\n");
+            printf("  --version           Show version information.\n");
+            return 0;
+        } else if (strcmp(argv[1], "--version") == 0) {
+            printf("%s\n", VERSION);
+            return 0;
+        } else if (strcmp(argv[1], "uninstall") == 0) {
+            if (geteuid() != 0) {
+                fprintf(stderr, "Error: uninstall must be run as root (use sudo).\n");
+                return 1;
+            }
+            system("systemctl stop localchatd");
+            system("systemctl disable localchatd");
+            unlink("/etc/systemd/system/localchatd.service");
+            unlink("/usr/local/sbin/localchatd");
+            unlink("/usr/local/bin/localchat");
+            system("systemctl daemon-reload");
+            printf("localchat has been uninstalled.\n");
+            return 0;
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[1]);
+            fprintf(stderr, "Use --help for usage information.\n");
+            return 1;
+        }
+    }
+
     setlocale(LC_ALL, "");
     load_local_username();
 
