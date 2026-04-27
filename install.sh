@@ -34,11 +34,7 @@ LOCAL_SOURCE="${LOCAL_SOURCE:-0}"
 # BASH_SOURCE[0] is unset; only resolve SCRIPT_DIR when actually needed.
 SCRIPT_DIR=""
 if [ "$LOCAL_SOURCE" = "1" ]; then
-    if [ -n "${BASH_SOURCE[0]:-}" ]; then
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    else
-        SCRIPT_DIR="$(pwd)"
-    fi
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 fi
 
 TMP_DIR=""
