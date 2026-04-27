@@ -12,7 +12,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <signal.h>
-#include <stdint.h>
+#include <wchar.h>
 #include <wchar.h>
 
 #define SOCKET_PATH "/run/localchat.sock"
