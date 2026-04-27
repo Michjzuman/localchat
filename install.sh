@@ -33,21 +33,18 @@ print_dependency_hint() {
 Required packages:
   Debian/Ubuntu: sudo apt install build-essential curl libncurses-dev
   Fedora:        sudo dnf install gcc curl ncurses-devel
+  RHEL/CentOS:   sudo yum install gcc make curl ncurses-devel
   Arch:          sudo pacman -S base-devel curl ncurses
 EOF
 }
 
-require_command() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-        echo "Missing command: $1" >&2
-        print_dependency_hint
-        exit 1
-    fi
-}
-
-check_ncurses() {
+has_ncurses() {
     local test_file
     local test_bin
+
+    if ! command -v gcc >/dev/null 2>&1; then
+        return 1
+    fi
 
     test_file="$(mktemp)"
     test_bin="$(mktemp)"
@@ -61,14 +58,62 @@ int main(void) {
 }
 EOF
 
-    if ! gcc -x c "$test_file" -o "$test_bin" -lncurses >/dev/null 2>&1; then
-        rm -f "$test_file" "$test_bin"
-        echo "ncurses headers or libraries are missing." >&2
+    gcc -x c "$test_file" -o "$test_bin" -lncurses >/dev/null 2>&1
+    local ok=$?
+
+    rm -f "$test_file" "$test_bin"
+    return "$ok"
+}
+
+install_dependencies() {
+    if command -v apt-get >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y build-essential curl libncurses-dev
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y gcc make curl ncurses-devel
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y gcc make curl ncurses-devel
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --needed --noconfirm base-devel curl ncurses
+    else
+        echo "No supported package manager found." >&2
         print_dependency_hint
         exit 1
     fi
+}
 
-    rm -f "$test_file" "$test_bin"
+ensure_dependencies() {
+    local needs_install=0
+
+    for command_name in gcc curl install mktemp; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            needs_install=1
+        fi
+    done
+
+    if ! has_ncurses; then
+        needs_install=1
+    fi
+
+    if [ "$needs_install" -eq 1 ]; then
+        echo "Installing missing build dependencies..."
+        install_dependencies
+    fi
+
+    for command_name in gcc curl install mktemp; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            echo "Missing command after dependency installation: $command_name" >&2
+            print_dependency_hint
+            exit 1
+        fi
+    done
+
+    if ! has_ncurses; then
+        echo "ncurses headers or libraries are missing after dependency installation." >&2
+        print_dependency_hint
+        exit 1
+    fi
 }
 
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
@@ -83,12 +128,11 @@ trap cleanup EXIT
 
 echo "[1/5] Checking dependencies..."
 
-require_command gcc
-require_command curl
-require_command install
-require_command mktemp
-require_command systemctl
-check_ncurses
+ensure_dependencies
+
+if ! command -v systemctl >/dev/null 2>&1; then
+    die "systemctl was not found. localchat needs a Linux system with systemd."
+fi
 
 TMP_DIR="$(mktemp -d)"
 cd "$TMP_DIR"

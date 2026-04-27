@@ -9,9 +9,7 @@ simple ncurses TUI.
 ## Requirements
 
 - Linux with systemd
-- `gcc`
-- `curl`
-- ncurses development package (`libncurses-dev`, `ncurses-devel`, or `ncurses`)
+- supported package manager (`apt-get`, `dnf`, `yum`, or `pacman`)
 - root privileges for installation and service setup
 
 ## Installation
@@ -20,9 +18,10 @@ simple ncurses TUI.
 curl -fsSL https://raw.githubusercontent.com/michjzuman/localchat/main/install.sh | sudo bash
 ```
 
-The script downloads `localchat.c` and `localchatd.c`, compiles both programs,
-installs the client to `/usr/local/bin/localchat`, installs the server to
-`/usr/local/sbin/localchatd`, and creates the `localchatd.service` systemd unit.
+The script installs missing build dependencies, downloads `localchat.c` and
+`localchatd.c`, compiles both programs, installs the client to
+`/usr/local/bin/localchat`, installs the server to `/usr/local/sbin/localchatd`,
+and creates the `localchatd.service` systemd unit.
 
 Repository, branch, and target paths can be overridden with environment
 variables when needed:
