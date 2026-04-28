@@ -57,5 +57,44 @@
       });
     }
   </script>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>localchat — Linux terminal chat</title>
+  <meta name="description" content="localchat is a small Linux terminal chat for multi-user systems.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <p class="badge">Linux • systemd • ncursesw</p>
+      <h1>localchat</h1>
+      <p class="sub">
+        A tiny terminal chat for Linux multi-user systems.
+        Fast to install, simple to run, and fun to use.
+      </p>
+
+      <div class="install">
+        <p class="install-title">Install in one command</p>
+        <pre><code>curl -fsSL https://localchat.michjzuman.com/install.sh | sudo bash</code></pre>
+      </div>
+
+      <div class="actions">
+        <a class="btn primary" href="https://github.com/michjzuman/localchat">View on GitHub</a>
+        <a class="btn" href="https://localchat.michjzuman.com/install.sh">install.sh</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>What you get</h2>
+      <ul>
+        <li>Unix socket based local chat room (`/run/localchat/socket`)</li>
+        <li>Per-user identity via real UID (`SO_PEERCRED`)</li>
+        <li>Bubble-style ncurses TUI with UTF-8 rendering</li>
+        <li>Hardened systemd service for the daemon</li>
+      </ul>
+    </section>
+  </main>
 </body>
 </html>
