@@ -23,7 +23,6 @@ jobs:
       - name: syntax / lint
         run: make check
 
-      - name: install.sh local-source check
+      - name: install.sh syntax check
         run: |
-          # Verify install.sh syntax + that LOCAL_SOURCE=1 picks up local files.
           bash -n install.sh

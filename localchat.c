@@ -25,6 +25,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <wchar.h>
 #include <wctype.h>
@@ -32,12 +33,14 @@
 #define VERSION             "1.1.0"
 #define DEFAULT_SOCKET_PATH "/run/localchat/socket"
 #define LEGACY_SOCKET_PATH  "/run/localchat.sock"
+#define INSTALL_URL         "https://localchat.michjzuman.com/install.sh"
 #define MAX_MSG_LEN         8192
 #define MAX_BODY_LEN        4096
 #define LEN_PREFIX_BYTES    4
 #define INPUT_WMAX          1024
 #define USERNAME_MAX        64
 #define LOG_CAP             1024
+#define BUBBLE_WRAP_COLS    64
 
 static int            sock_fd = -1;
 static WINDOW        *chat_win  = NULL;
@@ -115,9 +118,12 @@ static int max_message_columns(void) {
     int h, w;
     getmaxyx(chat_win, h, w);
     (void)h;
-    if (w > 12) return w - 8;
-    if (w > 6)  return w - 5;
-    return 1;
+    int cols;
+    if (w > 12) cols = w - 8;
+    else if (w > 6) cols = w - 5;
+    else cols = 1;
+    if (cols > BUBBLE_WRAP_COLS) cols = BUBBLE_WRAP_COLS;
+    return cols;
 }
 
 static void load_local_username(void) {
@@ -171,97 +177,150 @@ static void render_system(const char *text) {
     wattroff(chat_win, A_DIM);
 }
 
-static void render_one_bubble(const char *name, int name_cols,
-                              const char *body, int body_cols,
-                              int own, int show_name, int show_tail) {
-    int h, w; getmaxyx(chat_win, h, w); (void)h;
-    int bubble_cols = body_cols + 5; /* "│ body │❯" / "❮│ body │" both = body+5 */
+static int next_message_chunk(const char **cursor, int max_cols,
+                              const char **chunk_start, size_t *chunk_len,
+                              int *chunk_cols) {
+    mbstate_t st; memset(&st, 0, sizeof(st));
+    const char *p = *cursor;
+    const char *start = p;
+    const char *end = p;
+    int cols = 0;
+
+    if (*p == '\0') return 0;
+    while (*p) {
+        wchar_t wc;
+        size_t r = mbrtowc(&wc, p, MB_CUR_MAX, &st);
+        if (r == (size_t)-1 || r == (size_t)-2) {
+            memset(&st, 0, sizeof(st));
+            p++;
+            end = p;
+            cols++;
+            if (cols >= max_cols) break;
+            continue;
+        }
+        if (r == 0) break;
+        int cw = wcwidth(wc);
+        if (cw < 0) cw = 1;
+        if (cols + cw > max_cols && end > start) break;
+        cols += cw;
+        p += r;
+        end = p;
+        if (cols >= max_cols) break;
+    }
+
+    if (end == start) return 0;
+    *cursor = end;
+    *chunk_start = start;
+    *chunk_len = (size_t)(end - start);
+    *chunk_cols = cols;
+    return 1;
+}
+
+static int wrapped_message_columns(const char *message, int max_cols) {
+    if (message[0] == '\0') return 0;
+
+    const char *p = message;
+    int widest = 0;
+    while (*p) {
+        const char *chunk_start;
+        size_t chunk_len;
+        int chunk_cols;
+        if (!next_message_chunk(&p, max_cols, &chunk_start, &chunk_len, &chunk_cols)) break;
+        (void)chunk_start;
+        (void)chunk_len;
+        if (chunk_cols > widest) widest = chunk_cols;
+    }
+    return widest;
+}
+
+static void render_bubble_line(const char *body, int body_cols, int line_cols,
+                               int own, int left_pad, int show_tail) {
+    int fill = body_cols - line_cols;
+    if (fill < 0) fill = 0;
 
     if (own) {
-        if (show_name) {
-            int name_pad = w - (name_cols + 3);
-            if (name_pad < 0) name_pad = 0;
-            put_spaces(chat_win, name_pad);
-            wprintw(chat_win, "%s   \n", name);
-        }
-
-        int bp = w - bubble_cols;
-        if (bp < 0) bp = 0;
-
-        put_spaces(chat_win, bp);
-        waddstr(chat_win, "╭─");
-        put_repeat(chat_win, "─", body_cols);
-        waddstr(chat_win, "─╮ \n");
-
-        put_spaces(chat_win, bp);
-        if (show_tail) wprintw(chat_win, "│ %s │❯\n", body);
-        else           wprintw(chat_win, "│ %s │ \n", body);
-
-        put_spaces(chat_win, bp);
-        waddstr(chat_win, "╰─");
-        put_repeat(chat_win, "─", body_cols);
-        waddstr(chat_win, "─╯ \n");
+        put_spaces(chat_win, left_pad);
+        waddstr(chat_win, "│ ");
+        waddstr(chat_win, body);
+        put_spaces(chat_win, fill);
+        if (show_tail) waddstr(chat_win, " │❯\n");
+        else           waddstr(chat_win, " │ \n");
     } else {
-        if (show_name) wprintw(chat_win, "  %s\n", name);
-        waddstr(chat_win, " ╭─");
-        put_repeat(chat_win, "─", body_cols);
-        waddstr(chat_win, "─╮\n");
-        if (show_tail) wprintw(chat_win, "❮│ %s │\n", body);
-        else           wprintw(chat_win, " │ %s │\n", body);
-        waddstr(chat_win, " ╰─");
-        put_repeat(chat_win, "─", body_cols);
-        waddstr(chat_win, "─╯\n");
+        if (show_tail) waddstr(chat_win, "❮│ ");
+        else           waddstr(chat_win, " │ ");
+        waddstr(chat_win, body);
+        put_spaces(chat_win, fill);
+        waddstr(chat_win, " │\n");
     }
 }
 
 static void render_bubble(const char *name, const char *message, int own,
                           int show_name, int show_tail) {
+    int h, w; getmaxyx(chat_win, h, w); (void)h;
     int name_cols = mb_columns(name);
     int max_cols  = max_message_columns();
     if (max_cols < 1) max_cols = 1;
-
-    if (message[0] == '\0') {
-        render_one_bubble(name, name_cols, "", 0, own, show_name, show_tail);
-        return;
+    if (own) {
+        int own_max_cols = w > 6 ? w - 6 : 1;
+        if (max_cols > own_max_cols) max_cols = own_max_cols;
     }
 
-    mbstate_t st; memset(&st, 0, sizeof(st));
-    const char *p = message;
+    int body_cols = wrapped_message_columns(message, max_cols);
+    int bubble_cols = body_cols + 5; /* "│ body │❯" / "❮│ body │" both = body+5 */
+    int left_pad = 0;
 
-    while (*p) {
-        const char *chunk_start = p;
-        const char *chunk_end   = p;
-        int chunk_cols = 0;
-
-        while (*p) {
-            wchar_t wc;
-            size_t r = mbrtowc(&wc, p, MB_CUR_MAX, &st);
-            if (r == (size_t)-1 || r == (size_t)-2) {
-                memset(&st, 0, sizeof(st));
-                p++;
-                chunk_end = p;
-                chunk_cols++;
-                if (chunk_cols >= max_cols) break;
-                continue;
-            }
-            if (r == 0) break;
-            int cw = wcwidth(wc);
-            if (cw < 0) cw = 1;
-            if (chunk_cols + cw > max_cols && chunk_end > chunk_start) break;
-            chunk_cols += cw;
-            p += r;
-            chunk_end = p;
-            if (chunk_cols >= max_cols) break;
+    if (own) {
+        int right_edge = w > 1 ? w - 1 : w;
+        if (show_name) {
+            int name_pad = right_edge - (name_cols + 3);
+            if (name_pad < 0) name_pad = 0;
+            put_spaces(chat_win, name_pad);
+            wprintw(chat_win, "%s   \n", name);
         }
 
-        if (chunk_end == chunk_start) break;
-        size_t chunk_len = (size_t)(chunk_end - chunk_start);
-        char chunk[MAX_BODY_LEN + 8];
-        if (chunk_len >= sizeof(chunk)) chunk_len = sizeof(chunk) - 1;
-        memcpy(chunk, chunk_start, chunk_len);
-        chunk[chunk_len] = '\0';
-        render_one_bubble(name, name_cols, chunk, chunk_cols,
-                          own, show_name, show_tail);
+        left_pad = right_edge - bubble_cols;
+        if (left_pad < 0) left_pad = 0;
+
+        put_spaces(chat_win, left_pad);
+        waddstr(chat_win, "╭─");
+        put_repeat(chat_win, "─", body_cols);
+        waddstr(chat_win, "─╮ \n");
+    } else {
+        if (show_name) wprintw(chat_win, "  %s\n", name);
+        waddstr(chat_win, " ╭─");
+        put_repeat(chat_win, "─", body_cols);
+        waddstr(chat_win, "─╮\n");
+    }
+
+    if (message[0] == '\0') {
+        render_bubble_line("", body_cols, 0, own, left_pad, show_tail);
+    } else {
+        const char *p = message;
+        while (*p) {
+            const char *chunk_start;
+            size_t chunk_len;
+            int chunk_cols;
+            if (!next_message_chunk(&p, max_cols, &chunk_start, &chunk_len, &chunk_cols)) break;
+
+            char chunk[MAX_BODY_LEN + 8];
+            if (chunk_len >= sizeof(chunk)) chunk_len = sizeof(chunk) - 1;
+            memcpy(chunk, chunk_start, chunk_len);
+            chunk[chunk_len] = '\0';
+
+            render_bubble_line(chunk, body_cols, chunk_cols, own, left_pad,
+                               show_tail && *p == '\0');
+        }
+    }
+
+    if (own) {
+        put_spaces(chat_win, left_pad);
+        waddstr(chat_win, "╰─");
+        put_repeat(chat_win, "─", body_cols);
+        waddstr(chat_win, "─╯ \n");
+    } else {
+        waddstr(chat_win, " ╰─");
+        put_repeat(chat_win, "─", body_cols);
+        waddstr(chat_win, "─╯\n");
     }
 }
 
@@ -657,27 +716,74 @@ static int connect_server(void) {
 
     fprintf(stderr, "could not connect to %s: %s\n", socket_path, strerror(e));
     fprintf(stderr, "is the localchatd service running?\n");
-    fprintf(stderr, "  sudo systemctl status localchatd\n");
+    fprintf(stderr, "  localchat status\n");
     return -1;
 }
 
-/* ---------- uninstall command ---------- */
+/* ---------- management commands ---------- */
+
+static int command_status(int rc) {
+    if (rc == -1) return 1;
+    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
+    if (WIFSIGNALED(rc)) return 128 + WTERMSIG(rc);
+    return 1;
+}
+
+static int run_shell_command(const char *cmd) {
+    return command_status(system(cmd));
+}
+
+static int require_root(const char *command) {
+    if (geteuid() == 0) return 1;
+    fprintf(stderr, "%s must be run as root (use sudo localchat %s)\n",
+            command, command);
+    return 0;
+}
+
+static int run_update(void) {
+    if (!require_root("update")) return 1;
+    printf("updating localchat from %s\n", INSTALL_URL);
+    return run_shell_command("curl -fsSL " INSTALL_URL " | bash");
+}
+
+static int run_service_command(const char *action, int needs_root) {
+    char cmd[128];
+    if (needs_root && !require_root(action)) return 1;
+    snprintf(cmd, sizeof(cmd), "systemctl %s localchatd", action);
+    return run_shell_command(cmd);
+}
+
+static int run_logs(int follow) {
+    if (follow) {
+        return run_shell_command("journalctl -u localchatd -f");
+    }
+    return run_shell_command("journalctl -u localchatd --no-pager -n 80");
+}
 
 static int run_uninstall(void) {
-    if (geteuid() != 0) {
-        fprintf(stderr, "uninstall must be run as root (use sudo)\n");
-        return 1;
-    }
+    if (!require_root("uninstall")) return 1;
     int rc;
     rc = system("systemctl stop localchatd 2>/dev/null"); (void)rc;
     rc = system("systemctl disable localchatd 2>/dev/null"); (void)rc;
     unlink("/etc/systemd/system/localchatd.service");
     unlink("/usr/local/sbin/localchatd");
     unlink("/usr/local/bin/localchat");
+    unlink(DEFAULT_SOCKET_PATH);
     unlink(LEGACY_SOCKET_PATH);
+    rmdir("/run/localchat");
     rc = system("systemctl daemon-reload 2>/dev/null"); (void)rc;
     printf("localchat has been uninstalled.\n");
     return 0;
+}
+
+static int is_command(const char *arg) {
+    return strcmp(arg, "update") == 0 ||
+           strcmp(arg, "status") == 0 ||
+           strcmp(arg, "start") == 0 ||
+           strcmp(arg, "stop") == 0 ||
+           strcmp(arg, "restart") == 0 ||
+           strcmp(arg, "logs") == 0 ||
+           strcmp(arg, "uninstall") == 0;
 }
 
 static void usage(FILE *out) {
@@ -686,6 +792,12 @@ static void usage(FILE *out) {
         "Usage: localchat [OPTIONS] [COMMAND]\n"
         "\n"
         "Commands:\n"
+        "  update               Download and run the installer (requires root).\n"
+        "  status               Show localchatd service status.\n"
+        "  start                Start localchatd (requires root).\n"
+        "  stop                 Stop localchatd (requires root).\n"
+        "  restart              Restart localchatd (requires root).\n"
+        "  logs [-f]            Show recent daemon logs, or follow them.\n"
         "  uninstall            Remove localchat (requires root).\n"
         "\n"
         "Options:\n"
@@ -704,21 +816,48 @@ static void usage(FILE *out) {
 }
 
 int main(int argc, char **argv) {
+    const char *command = NULL;
+    int logs_follow = 0;
+
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
+        if (command) {
+            if (strcmp(command, "logs") == 0 &&
+                (strcmp(a, "-f") == 0 || strcmp(a, "--follow") == 0)) {
+                logs_follow = 1;
+                continue;
+            }
+            fprintf(stderr, "unexpected argument: %s\n", a);
+            usage(stderr);
+            return 2;
+        } else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             usage(stdout); return 0;
         } else if (strcmp(a, "--version") == 0) {
             printf("%s\n", VERSION); return 0;
-        } else if (strcmp(a, "uninstall") == 0) {
-            return run_uninstall();
-        } else if ((strcmp(a, "-s") == 0 || strcmp(a, "--socket") == 0) && i + 1 < argc) {
+        } else if (strcmp(a, "-s") == 0 || strcmp(a, "--socket") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing argument for %s\n", a);
+                usage(stderr);
+                return 2;
+            }
             socket_path = argv[++i];
+        } else if (is_command(a)) {
+            command = a;
         } else {
             fprintf(stderr, "unknown option: %s\n", a);
             usage(stderr);
             return 2;
         }
+    }
+
+    if (command) {
+        if (strcmp(command, "update") == 0) return run_update();
+        if (strcmp(command, "status") == 0) return run_service_command("status", 0);
+        if (strcmp(command, "start") == 0) return run_service_command("start", 1);
+        if (strcmp(command, "stop") == 0) return run_service_command("stop", 1);
+        if (strcmp(command, "restart") == 0) return run_service_command("restart", 1);
+        if (strcmp(command, "logs") == 0) return run_logs(logs_follow);
+        if (strcmp(command, "uninstall") == 0) return run_uninstall();
     }
 
     setlocale(LC_ALL, "");

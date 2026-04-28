@@ -25,9 +25,8 @@ is needed for correctness.
 - `install.sh` — root-run installer. Installs deps on supported distros,
   downloads sources from GitHub (or uses local with `LOCAL_SOURCE=1`),
   compiles via Makefile, installs binaries + service.
-- `Makefile` — `make` / `make check` / `make test` / `make install`.
-- `tests/test_client.c`, `tests/smoke.sh` — minimal Linux smoke test.
-- `.github/workflows/ci.yml` — GitHub Actions CI (build + smoke test).
+- `Makefile` — `make` / `make check` / `make install`.
+- `.github/workflows/ci.yml` — GitHub Actions CI (build + syntax check).
 - `design.py` — Python prototype for the chat-bubble layout. The C client
   follows this style: own messages right-aligned, others left-aligned,
   three-line boxed input.
@@ -38,7 +37,6 @@ is needed for correctness.
 ```sh
 make                     # builds localchatd + localchat
 make check               # syntax check + bash -n install.sh
-make test                # builds + runs tests/smoke.sh (Linux only)
 sudo make install        # installs binaries to /usr/local
 ```
 
@@ -133,7 +131,7 @@ Both sides sanitize control characters (kept: `\t`; everything else under
   portability.
 - Do not introduce large frameworks or build systems without a clear
   need. Prefer focused C changes and simple shell in `install.sh`.
-- Before committing, run `make check` and (on Linux) `make test`.
+- Before committing, run `make check`.
 - Compile the touched C target where the local environment allows.
 - Both client and server must stay binary-protocol compatible; if you
   change the framing or message format, update **both** in the same

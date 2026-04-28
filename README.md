@@ -53,10 +53,10 @@ sudo systemctl enable --now localchatd
 After installation the server runs as a systemd service:
 
 ```sh
-sudo systemctl status localchatd
-sudo systemctl restart localchatd
-sudo systemctl stop localchatd
-journalctl -u localchatd -f
+localchat status
+sudo localchat restart
+sudo localchat stop
+localchat logs -f
 ```
 
 Start the chat as a normal user:
@@ -86,6 +86,10 @@ All users on the same system who run `localchat` share one chat room.
 
 ```text
 localchat [--socket PATH] [--version] [--help]
+localchat update                 # download and run the installer (root)
+localchat status                 # show localchatd service status
+localchat start|stop|restart     # manage localchatd (root)
+localchat logs [-f]              # show recent daemon logs, optionally follow
 localchat uninstall              # remove binaries + systemd unit (root)
 
 localchatd [--socket PATH] [--version] [--help]
