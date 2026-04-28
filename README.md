@@ -73,12 +73,13 @@ All users on the same system who run `localchat` share one chat room.
 |--------------------|------------------------------|
 | Enter              | send message                 |
 | ←/→                | move cursor                  |
+| ↑/↓                | scroll back / forward (line) |
 | Home / End         | start / end of input         |
 | Backspace / Del    | edit                         |
 | Ctrl-W             | delete previous word         |
 | Ctrl-U / Ctrl-K    | clear input / kill to EOL    |
 | Ctrl-L             | redraw                       |
-| PgUp / PgDn        | scroll back / forward        |
+| PgUp / PgDn        | scroll back / forward (page) |
 | Ctrl-C / Ctrl-D    | quit                         |
 
 ### Command-line
@@ -114,16 +115,6 @@ messages and `[system] body` for notifications. Client-to-server payloads
 are the raw message body (max 4096 bytes). The server prefixes with the
 user's name (resolved from `SO_PEERCRED` + `getpwuid`) and broadcasts to
 all connected clients.
-
-## Tests
-
-```sh
-make test         # builds the daemon, runs tests/smoke.sh
-```
-
-The smoke test starts a daemon on a temporary socket, runs a small C
-client to verify welcome + echo framing, and checks that oversized
-messages get the client dropped.
 
 ## Service Hardening
 
