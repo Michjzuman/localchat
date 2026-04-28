@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>localchat</title>
+  <meta name="description" content="localchat Landingpage im Terminal- / ASCII-Stil.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="stage">
+    <section class="chat" aria-label="localchat bubbles">
+      <div class="bubble left">
+        <div class="name">localchat</div>
+        <pre>❮┌───────────┐
+ │ localchat │
+ └───────────┘</pre>
+      </div>
+
+      <div class="bubble right">
+        <div class="name">install</div>
+        <pre>┌──────────────────────────────────────────────────────────────┐❯
+│ <code id="install-command">curl -fsSL https://localchat.michjzuman.com/install.sh | sudo bash</code> │
+└──────────────────────────────────────────────────────────────┘</pre>
+        <button id="copy-install" type="button" aria-label="Install command kopieren">Copy</button>
+        <p id="copy-status" class="copy-status" aria-live="polite"></p>
+      </div>
+
+      <div class="bubble left">
+        <div class="name">about</div>
+        <pre>❮┌──────────────────────┐
+ │ by Michjzuman        │
+ └──────────────────────┘</pre>
+        <a class="github-link" href="https://github.com/michjzuman/localchat" aria-label="GitHub Repository">GitHub ↗</a>
+      </div>
+    </section>
+  </main>
+  <script>
+    const copyBtn = document.getElementById('copy-install');
+    const cmd = document.getElementById('install-command')?.textContent || '';
+    if (copyBtn && cmd) {
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(cmd);
+          const prev = copyBtn.textContent;
+          copyBtn.textContent = 'Kopiert';
+          const status = document.getElementById('copy-status');
+          if (status) status.textContent = 'Install-Befehl kopiert.';
+          setTimeout(() => { copyBtn.textContent = prev; }, 1200);
+        } catch (_) {
+          copyBtn.textContent = 'Fehler';
+          const status = document.getElementById('copy-status');
+          if (status) status.textContent = 'Kopieren fehlgeschlagen.';
+        }
+      });
+    }
+  </script>
+</body>
+</html>
