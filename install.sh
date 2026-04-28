@@ -5,7 +5,7 @@
 # Downloads sources from GitHub, compiles, installs to /usr/local, and
 # enables the localchatd systemd service. Usage:
 #
-#   curl -fsSL https://raw.githubusercontent.com/michjzuman/localchat/main/install.sh | sudo bash
+#   curl -fsSL https://localchat.michjzuman.com/install.sh | sudo bash
 #
 # Environment overrides:
 #   GITHUB_USER, GITHUB_REPO, GITHUB_BRANCH, RAW_BASE
