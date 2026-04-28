@@ -16,7 +16,7 @@ shows an ncursesw TUI with chat bubbles.
 ## Installation
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/michjzuman/localchat/main/install.sh | sudo bash
+curl -fsSL https://localchat.michjzuman.com/install.sh | sudo bash
 ```
 
 The script installs missing build dependencies, downloads the sources,
