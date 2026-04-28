@@ -41,6 +41,8 @@
 #define USERNAME_MAX        32
 #define IN_BUF_CAP          (LEN_PREFIX_BYTES + MAX_MSG_LEN)
 #define OUT_BUF_CAP         (64 * 1024)
+#define HISTORY_CAP         128
+#define HISTORY_REPLAY_CAP  (OUT_BUF_CAP - 4096)
 
 typedef struct {
     int            fd;
@@ -57,6 +59,9 @@ static int    wakeup_pipe[2] = {-1, -1};
 static volatile sig_atomic_t shutdown_requested = 0;
 
 static const char *socket_path = DEFAULT_SOCKET_PATH;
+static char       *history[HISTORY_CAP];
+static size_t      history_len[HISTORY_CAP];
+static size_t      history_count = 0;
 
 static void log_msg(const char *fmt, ...) {
     va_list ap;
@@ -143,9 +148,56 @@ static int queue_bytes(Client *c, const void *data, size_t n) {
 static int queue_msg(Client *c, const char *text) {
     size_t len = strlen(text);
     if (len > MAX_MSG_LEN) len = MAX_MSG_LEN;
+    if (c->out_len + LEN_PREFIX_BYTES + len > OUT_BUF_CAP) return -1;
     uint32_t netlen = htonl((uint32_t)len);
     if (queue_bytes(c, &netlen, sizeof(netlen)) != 0) return -1;
-    return queue_bytes(c, text, len);
+    if (queue_bytes(c, text, len) != 0) {
+        c->out_len -= LEN_PREFIX_BYTES;
+        return -1;
+    }
+    return 0;
+}
+
+static void history_add(const char *text) {
+    size_t len = strlen(text);
+    if (len > MAX_MSG_LEN) len = MAX_MSG_LEN;
+
+    char *copy = malloc(len + 1);
+    if (!copy) return;
+    memcpy(copy, text, len);
+    copy[len] = '\0';
+
+    size_t slot = history_count % HISTORY_CAP;
+    free(history[slot]);
+    history[slot] = copy;
+    history_len[slot] = len;
+    history_count++;
+}
+
+static void queue_history(Client *c) {
+    size_t available = history_count < HISTORY_CAP ? history_count : HISTORY_CAP;
+    if (available == 0) return;
+
+    size_t first = history_count - available;
+    size_t replay_bytes = 0;
+    size_t start = history_count;
+
+    for (size_t n = 0; n < available; n++) {
+        size_t idx = history_count - 1 - n;
+        size_t slot = idx % HISTORY_CAP;
+        size_t framed_len = LEN_PREFIX_BYTES + history_len[slot];
+        if (!history[slot]) continue;
+        if (replay_bytes + framed_len > HISTORY_REPLAY_CAP) break;
+        replay_bytes += framed_len;
+        start = idx;
+    }
+
+    if (start < first) start = first;
+    for (size_t idx = start; idx < history_count; idx++) {
+        size_t slot = idx % HISTORY_CAP;
+        if (!history[slot]) continue;
+        if (queue_msg(c, history[slot]) != 0) break;
+    }
 }
 
 static void disconnect_client(int idx, const char *reason);
@@ -226,6 +278,7 @@ static int process_in_buffer(int idx) {
 
         char out[USERNAME_MAX + MAX_BODY_LEN + 8];
         snprintf(out, sizeof(out), "[%s] %s", c->username, body + bstart);
+        history_add(out);
         broadcast_text(out, -1);
     }
 }
@@ -325,6 +378,7 @@ static void accept_one(int server_fd) {
         c->fd = cfd;
         resolve_username(cfd, c->username, sizeof(c->username));
 
+        queue_history(c);
         queue_msg(c, "[system] welcome to localchat");
 
         char join[USERNAME_MAX + 32];
@@ -489,5 +543,6 @@ int main(int argc, char **argv) {
     unlink(socket_path);
     close(wakeup_pipe[0]);
     close(wakeup_pipe[1]);
+    for (int i = 0; i < HISTORY_CAP; i++) free(history[i]);
     return 0;
 }

@@ -135,6 +135,7 @@ system can connect.
 - Bubble rendering assumes a UTF-8 terminal that supports box-drawing
   characters.
 - Scrollback is limited to the last ~1024 messages of the current session.
-- No persistent history across daemon restarts.
+- New clients receive recent in-memory chat history from the daemon, but
+  history is not persisted across daemon restarts.
 - Resizing the terminal re-renders from in-memory log; older messages may
   be lost if more than ~1024 messages have arrived.

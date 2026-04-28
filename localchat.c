@@ -51,6 +51,7 @@ static const char    *socket_path = DEFAULT_SOCKET_PATH;
 static int            term_h = 0;
 static int            term_w = 0;
 static int            chat_h = 0;
+static int            colors_enabled = 0;
 
 static unsigned char  recv_buf[LEN_PREFIX_BYTES + MAX_MSG_LEN + 16];
 static size_t         recv_len = 0;
@@ -73,6 +74,17 @@ typedef struct {
     const char *name;
     const char *msg;
 } ParsedLine;
+
+enum {
+    CP_OWN = 1,
+    CP_OWN_DIM,
+    CP_OTHER,
+    CP_OTHER_DIM,
+    CP_SYSTEM,
+    CP_INPUT,
+    CP_INPUT_MARK,
+    CP_SCROLL
+};
 
 /* ---------- low-level helpers ---------- */
 
@@ -112,6 +124,42 @@ static int wcs_columns(const wchar_t *s, int n) {
         if (w > 0) cols += w;
     }
     return cols;
+}
+
+static void init_color_pairs(void) {
+    if (!has_colors() || start_color() == ERR) return;
+    if (COLOR_PAIRS <= CP_SCROLL) return;
+
+    short bg = COLOR_BLACK;
+    if (use_default_colors() == OK) bg = -1;
+
+    init_pair(CP_OWN,        COLOR_GREEN,  bg);
+    init_pair(CP_OWN_DIM,    COLOR_GREEN,  bg);
+    init_pair(CP_OTHER,      COLOR_YELLOW, bg);
+    init_pair(CP_OTHER_DIM,  COLOR_YELLOW, bg);
+    init_pair(CP_SYSTEM,     COLOR_CYAN,   bg);
+    init_pair(CP_INPUT,      COLOR_WHITE,  bg);
+    init_pair(CP_INPUT_MARK, COLOR_GREEN,  bg);
+    init_pair(CP_SCROLL,     COLOR_BLACK,  COLOR_YELLOW);
+    colors_enabled = 1;
+}
+
+static void style_on(WINDOW *win, int pair, int attrs) {
+    if (colors_enabled && pair > 0) wattron(win, COLOR_PAIR(pair));
+    if (attrs) wattron(win, attrs);
+}
+
+static void style_off(WINDOW *win, int pair, int attrs) {
+    if (attrs) wattroff(win, attrs);
+    if (colors_enabled && pair > 0) wattroff(win, COLOR_PAIR(pair));
+}
+
+static int message_pair(int own) {
+    return own ? CP_OWN : CP_OTHER;
+}
+
+static int border_pair(int own) {
+    return own ? CP_OWN_DIM : CP_OTHER_DIM;
 }
 
 static int max_message_columns(void) {
@@ -170,11 +218,11 @@ static void render_system(const char *text) {
     int cols = mb_columns(text);
     int pad  = (w - cols) / 2;
     if (pad < 0) pad = 0;
-    wattron(chat_win, A_DIM);
+    style_on(chat_win, CP_SYSTEM, A_DIM);
     put_spaces(chat_win, pad);
     waddstr(chat_win, text);
     waddch(chat_win, '\n');
-    wattroff(chat_win, A_DIM);
+    style_off(chat_win, CP_SYSTEM, A_DIM);
 }
 
 static int next_message_chunk(const char **cursor, int max_cols,
@@ -240,17 +288,47 @@ static void render_bubble_line(const char *body, int body_cols, int line_cols,
 
     if (own) {
         put_spaces(chat_win, left_pad);
+        style_on(chat_win, border_pair(own), A_DIM);
         waddstr(chat_win, "│ ");
+        style_off(chat_win, border_pair(own), A_DIM);
+
+        style_on(chat_win, message_pair(own), 0);
         waddstr(chat_win, body);
         put_spaces(chat_win, fill);
-        if (show_tail) waddstr(chat_win, " │❯\n");
-        else           waddstr(chat_win, " │ \n");
+        style_off(chat_win, message_pair(own), 0);
+
+        style_on(chat_win, border_pair(own), A_DIM);
+        waddstr(chat_win, " │");
+        style_off(chat_win, border_pair(own), A_DIM);
+        if (show_tail) {
+            style_on(chat_win, message_pair(own), A_BOLD);
+            waddstr(chat_win, "❯");
+            style_off(chat_win, message_pair(own), A_BOLD);
+            waddch(chat_win, '\n');
+        } else {
+            waddstr(chat_win, " \n");
+        }
     } else {
-        if (show_tail) waddstr(chat_win, "❮│ ");
-        else           waddstr(chat_win, " │ ");
+        if (show_tail) {
+            style_on(chat_win, message_pair(own), A_BOLD);
+            waddstr(chat_win, "❮");
+            style_off(chat_win, message_pair(own), A_BOLD);
+        } else {
+            waddstr(chat_win, " ");
+        }
+        style_on(chat_win, border_pair(own), A_DIM);
+        waddstr(chat_win, "│ ");
+        style_off(chat_win, border_pair(own), A_DIM);
+
+        style_on(chat_win, message_pair(own), 0);
         waddstr(chat_win, body);
         put_spaces(chat_win, fill);
-        waddstr(chat_win, " │\n");
+        style_off(chat_win, message_pair(own), 0);
+
+        style_on(chat_win, border_pair(own), A_DIM);
+        waddstr(chat_win, " │");
+        style_off(chat_win, border_pair(own), A_DIM);
+        waddch(chat_win, '\n');
     }
 }
 
@@ -275,21 +353,31 @@ static void render_bubble(const char *name, const char *message, int own,
             int name_pad = right_edge - (name_cols + 3);
             if (name_pad < 0) name_pad = 0;
             put_spaces(chat_win, name_pad);
+            style_on(chat_win, message_pair(own), A_BOLD);
             wprintw(chat_win, "%s   \n", name);
+            style_off(chat_win, message_pair(own), A_BOLD);
         }
 
         left_pad = right_edge - bubble_cols;
         if (left_pad < 0) left_pad = 0;
 
         put_spaces(chat_win, left_pad);
+        style_on(chat_win, border_pair(own), A_DIM);
         waddstr(chat_win, "╭─");
         put_repeat(chat_win, "─", body_cols);
         waddstr(chat_win, "─╮ \n");
+        style_off(chat_win, border_pair(own), A_DIM);
     } else {
-        if (show_name) wprintw(chat_win, "  %s\n", name);
+        if (show_name) {
+            style_on(chat_win, message_pair(own), A_BOLD);
+            wprintw(chat_win, "  %s\n", name);
+            style_off(chat_win, message_pair(own), A_BOLD);
+        }
+        style_on(chat_win, border_pair(own), A_DIM);
         waddstr(chat_win, " ╭─");
         put_repeat(chat_win, "─", body_cols);
         waddstr(chat_win, "─╮\n");
+        style_off(chat_win, border_pair(own), A_DIM);
     }
 
     if (message[0] == '\0') {
@@ -314,13 +402,17 @@ static void render_bubble(const char *name, const char *message, int own,
 
     if (own) {
         put_spaces(chat_win, left_pad);
+        style_on(chat_win, border_pair(own), A_DIM);
         waddstr(chat_win, "╰─");
         put_repeat(chat_win, "─", body_cols);
         waddstr(chat_win, "─╯ \n");
+        style_off(chat_win, border_pair(own), A_DIM);
     } else {
+        style_on(chat_win, border_pair(own), A_DIM);
         waddstr(chat_win, " ╰─");
         put_repeat(chat_win, "─", body_cols);
         waddstr(chat_win, "─╯\n");
+        style_off(chat_win, border_pair(own), A_DIM);
     }
 }
 
@@ -356,15 +448,121 @@ static void log_add(const char *raw) {
     log_count++;
 }
 
+static int oldest_log_index(void) {
+    return log_count > LOG_CAP ? log_count - LOG_CAP : 0;
+}
+
+static int wrapped_message_line_count(const char *message, int max_cols) {
+    if (message[0] == '\0') return 1;
+
+    const char *p = message;
+    int lines = 0;
+    while (*p) {
+        const char *chunk_start;
+        size_t chunk_len;
+        int chunk_cols;
+        if (!next_message_chunk(&p, max_cols, &chunk_start, &chunk_len, &chunk_cols)) break;
+        (void)chunk_start;
+        (void)chunk_len;
+        (void)chunk_cols;
+        lines++;
+    }
+    return lines > 0 ? lines : 1;
+}
+
+static int bubble_line_count(const ParsedLine *line, int show_name) {
+    int max_cols = max_message_columns();
+    if (max_cols < 1) max_cols = 1;
+    if (line->own) {
+        int h, w; getmaxyx(chat_win, h, w); (void)h;
+        int own_max_cols = w > 6 ? w - 6 : 1;
+        if (max_cols > own_max_cols) max_cols = own_max_cols;
+    }
+    return (show_name ? 1 : 0) + 2 + wrapped_message_line_count(line->msg, max_cols);
+}
+
+static int rendered_log_rows(int idx) {
+    const char *raw = log_lines[idx % LOG_CAP];
+    if (!raw) return 0;
+
+    char tmp[MAX_MSG_LEN + 32];
+    snprintf(tmp, sizeof(tmp), "%s", raw);
+    ParsedLine cur = parse_chat_line(tmp);
+    if (!cur.is_chat) {
+        int h, w; getmaxyx(chat_win, h, w); (void)h;
+        int cols = mb_columns(tmp);
+        if (w <= 0) return 1;
+        return cols > 0 ? (cols + w - 1) / w : 1;
+    }
+
+    int show_name = 1;
+    int oldest = oldest_log_index();
+    if (idx > oldest) {
+        const char *prev_raw = log_lines[(idx - 1) % LOG_CAP];
+        if (prev_raw) {
+            char prev_tmp[MAX_MSG_LEN + 32];
+            snprintf(prev_tmp, sizeof(prev_tmp), "%s", prev_raw);
+            ParsedLine prev = parse_chat_line(prev_tmp);
+            if (prev.is_chat && strcmp(prev.name, cur.name) == 0) show_name = 0;
+        }
+    }
+
+    return bubble_line_count(&cur, show_name);
+}
+
+static int total_rendered_rows(void) {
+    int oldest = oldest_log_index();
+    int rows = 0;
+    for (int i = oldest; i < log_count; i++) {
+        rows += rendered_log_rows(i);
+    }
+    return rows;
+}
+
+static int max_scroll_offset(void) {
+    int oldest = oldest_log_index();
+    int entries = log_count - oldest;
+    if (entries <= 1) return 0;
+    if (total_rendered_rows() <= chat_h) return 0;
+    return entries - 1;
+}
+
+static void clamp_scroll_offset(void) {
+    int max_scroll = max_scroll_offset();
+    if (scroll_offset < 0) scroll_offset = 0;
+    if (scroll_offset > max_scroll) scroll_offset = max_scroll;
+}
+
 static void rerender_chat(void) {
     werase(chat_win);
+    clamp_scroll_offset();
+
+    int reserved_rows = scroll_offset > 0 ? 1 : 0;
+    int visible_rows = chat_h - reserved_rows;
+    if (visible_rows < 1) visible_rows = 1;
+
     int last = log_count - scroll_offset;
     if (last > log_count) last = log_count;
     if (last < 0) last = 0;
-    int oldest = log_count > LOG_CAP ? log_count - LOG_CAP : 0;
-    int show   = chat_h > 1 ? chat_h : 4;
-    int first  = last - show;
-    if (first < oldest) first = oldest;
+    int oldest = oldest_log_index();
+    if (last < oldest) last = oldest;
+
+    int first = last;
+    int rows = 0;
+    while (first > oldest && rows < visible_rows) {
+        first--;
+        rows += rendered_log_rows(first);
+    }
+
+    if (scroll_offset > 0) {
+        if (colors_enabled) style_on(chat_win, CP_SCROLL, A_BOLD);
+        else wattron(chat_win, A_REVERSE);
+        mvwprintw(chat_win, 0, 0, " -- scrollback (%d) -- ", scroll_offset);
+        if (colors_enabled) style_off(chat_win, CP_SCROLL, A_BOLD);
+        else wattroff(chat_win, A_REVERSE);
+        wmove(chat_win, 1, 0);
+    }
+
     for (int i = first; i < last; i++) {
         const char *raw = log_lines[i % LOG_CAP];
         if (!raw) continue;
@@ -379,7 +577,7 @@ static void rerender_chat(void) {
         int show_name = 1;
         int show_tail = 1;
 
-        if (i > 0) {
+        if (i > oldest) {
             const char *prev_raw = log_lines[(i - 1) % LOG_CAP];
             if (prev_raw) {
                 char prev_tmp[MAX_MSG_LEN + 32];
@@ -400,21 +598,19 @@ static void rerender_chat(void) {
 
         render_bubble(cur.name, cur.msg, cur.own, show_name, show_tail);
     }
-    if (scroll_offset > 0) {
-        wattron(chat_win, A_REVERSE);
-        mvwprintw(chat_win, 0, 0, " -- scrollback (%d) -- ", scroll_offset);
-        wattroff(chat_win, A_REVERSE);
-    }
 }
 
 static void render_input(void) {
     int h, w; getmaxyx(input_win, h, w); (void)h;
     werase(input_win);
     if (w < 6) {
+        style_on(input_win, CP_INPUT, A_DIM);
         box(input_win, 0, 0);
+        style_off(input_win, CP_INPUT, A_DIM);
         wnoutrefresh(input_win);
         return;
     }
+    style_on(input_win, CP_INPUT, A_DIM);
     mvwaddstr(input_win, 0, 0, "╭");
     put_repeat(input_win, "─", w - 2);
     waddstr(input_win, "╮");
@@ -422,11 +618,15 @@ static void render_input(void) {
     mvwaddstr(input_win, 1, 0, "│");
     put_spaces(input_win, w - 2);
     mvwaddstr(input_win, 1, w - 1, "│");
-    mvwaddstr(input_win, 1, w - 3, "⏎");
 
     mvwaddstr(input_win, 2, 0, "╰");
     put_repeat(input_win, "─", w - 2);
     waddstr(input_win, "╯");
+    style_off(input_win, CP_INPUT, A_DIM);
+
+    style_on(input_win, CP_INPUT_MARK, A_BOLD);
+    mvwaddstr(input_win, 1, w - 3, "⏎");
+    style_off(input_win, CP_INPUT_MARK, A_BOLD);
 
     int input_cols = w - 5;
     if (input_cols < 1) input_cols = 1;
@@ -455,7 +655,9 @@ static void render_input(void) {
         size_t n = wcrtomb(tmp, input_buf[wi], &st);
         if (n != (size_t)-1) {
             tmp[n] = '\0';
+            style_on(input_win, CP_INPUT, 0);
             mvwaddstr(input_win, 1, 2 + visible, tmp);
+            style_off(input_win, CP_INPUT, 0);
         }
         visible += cw;
         wi++;
@@ -599,11 +801,10 @@ static void delete_word_back(void) {
 }
 
 static void scroll_by(int delta) {
-    int max_scroll = log_count;
+    int old_offset = scroll_offset;
     scroll_offset += delta;
-    if (scroll_offset < 0) scroll_offset = 0;
-    if (scroll_offset > max_scroll) scroll_offset = max_scroll;
-    rerender_chat();
+    clamp_scroll_offset();
+    if (scroll_offset != old_offset) rerender_chat();
 }
 
 static void scroll_page_up(void) {
@@ -877,6 +1078,7 @@ int main(int argc, char **argv) {
     nonl();
     keypad(stdscr, TRUE);
     curs_set(1);
+    init_color_pairs();
 
     getmaxyx(stdscr, term_h, term_w);
     chat_h = term_h - 3;
