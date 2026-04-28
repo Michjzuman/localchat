@@ -1,0 +1,97 @@
+body {
+  margin: 0;
+  padding: 24px;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  line-height: 1.5;
+  color: #111;
+  background: #fff;
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+h1 {
+  margin-top: 0;
+  margin-bottom: 0.3rem;
+}
+
+.lead {
+  margin-top: 0;
+  color: #444;
+}
+
+h2 {
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+pre {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #ddd;
+  background: #f6f6f6;
+  overflow-x: auto;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.links {
+  margin-top: 10px;
+}
+
+.links a {
+  color: #0b57d0;
+  text-decoration: none;
+}
+
+.links a:hover {
+  text-decoration: underline;
+}
+
+.install-box {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+#copy-install {
+  border: 1px solid #d2d2d2;
+  background: #fff;
+  color: #222;
+  border-radius: 6px;
+  padding: 0 12px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+#copy-install:hover {
+  background: #f2f2f2;
+}
+
+.github-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.85;
+}
+
+.github-link svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+@media (max-width: 720px) {
+  .install-box {
+    flex-direction: column;
+  }
+
+  #copy-install {
+    padding: 8px 12px;
+    width: fit-content;
+  }
+}

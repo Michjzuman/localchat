@@ -64,6 +64,13 @@ static int            scroll_offset = 0;
 static volatile sig_atomic_t exit_requested   = 0;
 static volatile sig_atomic_t resize_pending   = 0;
 
+typedef struct {
+    int         is_chat;
+    int         own;
+    const char *name;
+    const char *msg;
+} ParsedLine;
+
 /* ---------- low-level helpers ---------- */
 
 static void on_signal(int sig) {
@@ -166,15 +173,17 @@ static void render_system(const char *text) {
 
 static void render_one_bubble(const char *name, int name_cols,
                               const char *body, int body_cols,
-                              int own) {
+                              int own, int show_name, int show_tail) {
     int h, w; getmaxyx(chat_win, h, w); (void)h;
     int bubble_cols = body_cols + 5; /* "│ body │❯" / "❮│ body │" both = body+5 */
 
     if (own) {
-        int name_pad = w - (name_cols + 3);
-        if (name_pad < 0) name_pad = 0;
-        put_spaces(chat_win, name_pad);
-        wprintw(chat_win, "%s   \n", name);
+        if (show_name) {
+            int name_pad = w - (name_cols + 3);
+            if (name_pad < 0) name_pad = 0;
+            put_spaces(chat_win, name_pad);
+            wprintw(chat_win, "%s   \n", name);
+        }
 
         int bp = w - bubble_cols;
         if (bp < 0) bp = 0;
@@ -185,31 +194,34 @@ static void render_one_bubble(const char *name, int name_cols,
         waddstr(chat_win, "─╮ \n");
 
         put_spaces(chat_win, bp);
-        wprintw(chat_win, "│ %s │❯\n", body);
+        if (show_tail) wprintw(chat_win, "│ %s │❯\n", body);
+        else           wprintw(chat_win, "│ %s │ \n", body);
 
         put_spaces(chat_win, bp);
         waddstr(chat_win, "╰─");
         put_repeat(chat_win, "─", body_cols);
         waddstr(chat_win, "─╯ \n");
     } else {
-        wprintw(chat_win, "  %s\n", name);
+        if (show_name) wprintw(chat_win, "  %s\n", name);
         waddstr(chat_win, " ╭─");
         put_repeat(chat_win, "─", body_cols);
         waddstr(chat_win, "─╮\n");
-        wprintw(chat_win, "❮│ %s │\n", body);
+        if (show_tail) wprintw(chat_win, "❮│ %s │\n", body);
+        else           wprintw(chat_win, " │ %s │\n", body);
         waddstr(chat_win, " ╰─");
         put_repeat(chat_win, "─", body_cols);
         waddstr(chat_win, "─╯\n");
     }
 }
 
-static void render_bubble(const char *name, const char *message, int own) {
+static void render_bubble(const char *name, const char *message, int own,
+                          int show_name, int show_tail) {
     int name_cols = mb_columns(name);
     int max_cols  = max_message_columns();
     if (max_cols < 1) max_cols = 1;
 
     if (message[0] == '\0') {
-        render_one_bubble(name, name_cols, "", 0, own);
+        render_one_bubble(name, name_cols, "", 0, own, show_name, show_tail);
         return;
     }
 
@@ -248,34 +260,34 @@ static void render_bubble(const char *name, const char *message, int own) {
         if (chunk_len >= sizeof(chunk)) chunk_len = sizeof(chunk) - 1;
         memcpy(chunk, chunk_start, chunk_len);
         chunk[chunk_len] = '\0';
-        render_one_bubble(name, name_cols, chunk, chunk_cols, own);
+        render_one_bubble(name, name_cols, chunk, chunk_cols,
+                          own, show_name, show_tail);
     }
 }
 
-static void render_chat_line_inplace(char *line) {
+static ParsedLine parse_chat_line(char *line) {
+    ParsedLine p = { .is_chat = 0, .own = 0, .name = NULL, .msg = NULL };
     size_t len = strlen(line);
     while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
         line[--len] = '\0';
     }
-    if (len == 0) return;
+    if (len == 0) return p;
 
     if (strncmp(line, "[system]", 8) == 0) {
-        render_system(line);
-        return;
+        return p;
     }
     if (line[0] == '[') {
         char *end = strchr(line + 1, ']');
         if (end) {
             *end = '\0';
-            const char *name = line + 1;
-            const char *msg  = end + 1;
-            if (*msg == ' ') msg++;
-            int own = strcmp(name, local_username) == 0;
-            render_bubble(name, msg, own);
-            return;
+            p.is_chat = 1;
+            p.name = line + 1;
+            p.msg  = end + 1;
+            if (*p.msg == ' ') p.msg++;
+            p.own = strcmp(p.name, local_username) == 0;
         }
     }
-    render_system(line);
+    return p;
 }
 
 static void log_add(const char *raw) {
@@ -299,7 +311,35 @@ static void rerender_chat(void) {
         if (!raw) continue;
         char tmp[MAX_MSG_LEN + 32];
         snprintf(tmp, sizeof(tmp), "%s", raw);
-        render_chat_line_inplace(tmp);
+        ParsedLine cur = parse_chat_line(tmp);
+        if (!cur.is_chat) {
+            render_system(tmp);
+            continue;
+        }
+
+        int show_name = 1;
+        int show_tail = 1;
+
+        if (i > 0) {
+            const char *prev_raw = log_lines[(i - 1) % LOG_CAP];
+            if (prev_raw) {
+                char prev_tmp[MAX_MSG_LEN + 32];
+                snprintf(prev_tmp, sizeof(prev_tmp), "%s", prev_raw);
+                ParsedLine prev = parse_chat_line(prev_tmp);
+                if (prev.is_chat && strcmp(prev.name, cur.name) == 0) show_name = 0;
+            }
+        }
+        if (i + 1 < log_count) {
+            const char *next_raw = log_lines[(i + 1) % LOG_CAP];
+            if (next_raw) {
+                char next_tmp[MAX_MSG_LEN + 32];
+                snprintf(next_tmp, sizeof(next_tmp), "%s", next_raw);
+                ParsedLine next = parse_chat_line(next_tmp);
+                if (next.is_chat && strcmp(next.name, cur.name) == 0) show_tail = 0;
+            }
+        }
+
+        render_bubble(cur.name, cur.msg, cur.own, show_name, show_tail);
     }
     if (scroll_offset > 0) {
         wattron(chat_win, A_REVERSE);
@@ -444,11 +484,7 @@ static int handle_socket_in(void) {
                 recv_len -= consumed;
 
                 log_add(body);
-                if (scroll_offset == 0) {
-                    char tmp[MAX_MSG_LEN + 32];
-                    snprintf(tmp, sizeof(tmp), "%s", body);
-                    render_chat_line_inplace(tmp);
-                }
+                if (scroll_offset == 0) rerender_chat();
             }
             continue;
         }
@@ -503,19 +539,22 @@ static void delete_word_back(void) {
     input_buf[input_len] = L'\0';
 }
 
-static void scroll_up(void) {
-    int step = chat_h / 4; if (step < 1) step = 1;
+static void scroll_by(int delta) {
     int max_scroll = log_count;
-    scroll_offset += step;
+    scroll_offset += delta;
+    if (scroll_offset < 0) scroll_offset = 0;
     if (scroll_offset > max_scroll) scroll_offset = max_scroll;
     rerender_chat();
 }
 
-static void scroll_down(void) {
+static void scroll_page_up(void) {
     int step = chat_h / 4; if (step < 1) step = 1;
-    scroll_offset -= step;
-    if (scroll_offset < 0) scroll_offset = 0;
-    rerender_chat();
+    scroll_by(step);
+}
+
+static void scroll_page_down(void) {
+    int step = chat_h / 4; if (step < 1) step = 1;
+    scroll_by(-step);
 }
 
 static void handle_resize(void);
@@ -534,8 +573,10 @@ static void process_keys(void) {
                 case KEY_RIGHT:     if (input_cursor < input_len) input_cursor++; break;
                 case KEY_HOME:      input_cursor = 0;          break;
                 case KEY_END:       input_cursor = input_len;  break;
-                case KEY_PPAGE:     scroll_up();   break;
-                case KEY_NPAGE:     scroll_down(); break;
+                case KEY_UP:        scroll_by(1); break;
+                case KEY_DOWN:      scroll_by(-1); break;
+                case KEY_PPAGE:     scroll_page_up();   break;
+                case KEY_NPAGE:     scroll_page_down(); break;
                 case KEY_RESIZE:    handle_resize(); break;
                 case KEY_ENTER:     send_input();    break;
                 default: break;
@@ -657,7 +698,8 @@ static void usage(FILE *out) {
         "  ←/→           move cursor       Home/End  start/end of input\n"
         "  Backspace/Del edit              Ctrl-W    delete word back\n"
         "  Ctrl-U/Ctrl-K clear / kill EOL  Ctrl-L    redraw\n"
-        "  PgUp/PgDn     scrollback        Ctrl-C/D  quit\n",
+        "  ↑/↓           scroll linewise   PgUp/PgDn scroll pagewise\n"
+        "  Ctrl-C/D      quit\n",
         VERSION, DEFAULT_SOCKET_PATH);
 }
 

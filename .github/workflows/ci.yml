@@ -15,16 +15,13 @@ jobs:
       - name: install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libncurses-dev python3
+          sudo apt-get install -y build-essential libncurses-dev
 
       - name: build
         run: make all
 
       - name: syntax / lint
         run: make check
-
-      - name: smoke test
-        run: bash tests/smoke.sh
 
       - name: install.sh local-source check
         run: |

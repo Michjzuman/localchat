@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>localchat</title>
+  <meta name="description" content="localchat ist ein kleines Terminal-Chat-Tool für Linux.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <h1>localchat</h1>
+    <p class="lead">Ein kleiner Chat für Linux-Terminals auf Mehrbenutzer-Systemen.</p>
+
+    <h2>Installation</h2>
+    <div class="install-box">
+      <pre><code id="install-command">curl -fsSL https://localchat.michjzuman.com/install.sh | sudo bash</code></pre>
+      <button id="copy-install" type="button" aria-label="Install command kopieren">Kopieren</button>
+    </div>
+
+    <p class="links">
+      <a class="github-link" href="https://github.com/michjzuman/localchat" aria-label="GitHub Repository">
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path d="M8 0C3.58 0 0 3.67 0 8.2c0 3.63 2.29 6.7 5.47 7.79.4.08.55-.18.55-.4 0-.2-.01-.87-.01-1.58-2.01.38-2.53-.5-2.69-.97-.09-.24-.48-.97-.82-1.17-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.84.72 1.23 1.87.88 2.33.67.07-.53.28-.88.5-1.08-1.78-.21-3.64-.91-3.64-4.04 0-.89.31-1.62.82-2.2-.08-.21-.36-1.05.08-2.18 0 0 .67-.22 2.2.84A7.32 7.32 0 0 1 8 4.78c.68 0 1.37.09 2.01.27 1.53-1.06 2.2-.84 2.2-.84.44 1.13.16 1.97.08 2.18.51.58.82 1.3.82 2.2 0 3.14-1.87 3.82-3.65 4.04.29.25.54.73.54 1.49 0 1.08-.01 1.95-.01 2.22 0 .22.15.49.55.4A8.23 8.23 0 0 0 16 8.2C16 3.67 12.42 0 8 0z"/>
+        </svg>
+        <span>GitHub</span>
+      </a>
+      <span>•</span>
+      <a href="https://localchat.michjzuman.com/install.sh">install.sh</a>
+    </p>
+
+    <h2>Kurz erklärt</h2>
+    <ul>
+      <li>Daemon läuft lokal über Unix-Socket.</li>
+      <li>Nutzer werden über ihre Linux-UID erkannt.</li>
+      <li>Client ist ein ncurses Terminal-Interface.</li>
+    </ul>
+  </main>
+  <script>
+    const copyBtn = document.getElementById('copy-install');
+    const cmd = document.getElementById('install-command')?.textContent || '';
+    if (copyBtn && cmd) {
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(cmd);
+          const prev = copyBtn.textContent;
+          copyBtn.textContent = 'Kopiert';
+          setTimeout(() => { copyBtn.textContent = prev; }, 1200);
+        } catch (_) {
+          copyBtn.textContent = 'Fehler';
+        }
+      });
+    }
+  </script>
+</body>
+</html>
