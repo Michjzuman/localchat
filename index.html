@@ -4,6 +4,36 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>localchat</title>
+  <meta name="description" content="localchat Landingpage im Terminal- / ASCII-Stil.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="stage">
+    <section class="chat" aria-label="localchat bubbles">
+      <div class="bubble left">
+        <div class="name">localchat</div>
+        <pre>❮┌───────────┐
+ │ localchat │
+ └───────────┘</pre>
+      </div>
+
+      <div class="bubble right">
+        <div class="name">install</div>
+        <pre>┌──────────────────────────────────────────────────────────────┐❯
+│ <code id="install-command">curl -fsSL https://localchat.michjzuman.com/install.sh | sudo bash</code> │
+└──────────────────────────────────────────────────────────────┘</pre>
+        <button id="copy-install" type="button" aria-label="Install command kopieren">Copy</button>
+        <p id="copy-status" class="copy-status" aria-live="polite"></p>
+      </div>
+
+      <div class="bubble left">
+        <div class="name">about</div>
+        <pre>❮┌──────────────────────┐
+ │ by Michjzuman        │
+ └──────────────────────┘</pre>
+        <a class="github-link" href="https://github.com/michjzuman/localchat" aria-label="GitHub Repository">GitHub ↗</a>
+      </div>
+    </section>
   <meta name="description" content="localchat ist ein kleines Terminal-Chat-Tool für Linux.">
   <link rel="stylesheet" href="styles.css">
 </head>
