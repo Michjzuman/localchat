@@ -87,6 +87,16 @@ welcome = recv_frame(second)
 assert history.endswith("hello\nhistory"), (history, welcome)
 assert welcome == "[system] welcome to localchat", (history, welcome)
 
+send_frame(first, "[localchat:typing] 1")
+typing_on = recv_frame(second)
+assert typing_on.startswith("[typing] "), typing_on
+assert typing_on.endswith(" 1"), typing_on
+
+send_frame(first, "[localchat:typing] 0")
+typing_off = recv_frame(second)
+assert typing_off.startswith("[typing] "), typing_off
+assert typing_off.endswith(" 0"), typing_off
+
 first.close()
 second.close()
 PY

@@ -53,6 +53,12 @@
 #define USERNAME_MAX        64
 #define LOG_CAP             1024
 #define BUBBLE_WRAP_COLS    64
+#define TYPING_CONTROL      "[localchat:typing]"
+#define TYPING_EVENT_PREFIX "[typing] "
+#define TYPING_IDLE_SECS    3
+#define TYPING_TTL_SECS     4
+#define TYPING_REFRESH_SECS 1
+#define MAX_TYPING_USERS    16
 
 static int            sock_fd = -1;
 static WINDOW        *status_win = NULL;
@@ -70,6 +76,9 @@ static int            debug_enabled = 0;
 static int            colors_enabled = 0;
 static int            suppress_replay_duplicates = 0;
 static time_t         next_reconnect_at = 0;
+static int            local_typing_sent = 0;
+static time_t         local_typing_deadline = 0;
+static time_t         next_typing_refresh = 0;
 
 static unsigned char  recv_buf[LEN_PREFIX_BYTES + MAX_MSG_LEN + 16];
 static size_t         recv_len = 0;
@@ -82,6 +91,13 @@ static int            input_cursor = 0;
 static char          *log_lines[LOG_CAP];
 static int            log_count = 0;
 static int            scroll_offset = 0;
+
+typedef struct {
+    char   name[USERNAME_MAX];
+    time_t expires_at;
+} TypingUser;
+
+static TypingUser typing_users[MAX_TYPING_USERS];
 
 static volatile sig_atomic_t exit_requested   = 0;
 static volatile sig_atomic_t resize_pending   = 0;
@@ -545,6 +561,87 @@ static int oldest_log_index(void) {
     return log_count > LOG_CAP ? log_count - LOG_CAP : 0;
 }
 
+static int clear_typing_user(const char *name) {
+    for (int i = 0; i < MAX_TYPING_USERS; i++) {
+        if (typing_users[i].name[0] && strcmp(typing_users[i].name, name) == 0) {
+            typing_users[i].name[0] = '\0';
+            typing_users[i].expires_at = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void clear_all_typing_users(void) {
+    for (int i = 0; i < MAX_TYPING_USERS; i++) {
+        typing_users[i].name[0] = '\0';
+        typing_users[i].expires_at = 0;
+    }
+}
+
+static int prune_typing_users(time_t now) {
+    int changed = 0;
+    for (int i = 0; i < MAX_TYPING_USERS; i++) {
+        if (typing_users[i].name[0] && typing_users[i].expires_at <= now) {
+            typing_users[i].name[0] = '\0';
+            typing_users[i].expires_at = 0;
+            changed = 1;
+        }
+    }
+    return changed;
+}
+
+static int typing_user_count(void) {
+    int count = 0;
+    for (int i = 0; i < MAX_TYPING_USERS; i++) {
+        if (typing_users[i].name[0]) count++;
+    }
+    return count;
+}
+
+static int set_typing_user(const char *name, int active) {
+    if (name[0] == '\0' || strcmp(name, local_username) == 0) return 0;
+    if (!active) return clear_typing_user(name);
+
+    time_t expires_at = time(NULL) + TYPING_TTL_SECS;
+    int free_slot = -1;
+    for (int i = 0; i < MAX_TYPING_USERS; i++) {
+        if (typing_users[i].name[0]) {
+            if (strcmp(typing_users[i].name, name) == 0) {
+                typing_users[i].expires_at = expires_at;
+                return 1;
+            }
+        } else if (free_slot < 0) {
+            free_slot = i;
+        }
+    }
+
+    if (free_slot < 0) free_slot = 0;
+    snprintf(typing_users[free_slot].name, sizeof(typing_users[free_slot].name), "%s", name);
+    typing_users[free_slot].expires_at = expires_at;
+    return 1;
+}
+
+static int handle_typing_event(const char *body) {
+    if (strncmp(body, TYPING_EVENT_PREFIX, strlen(TYPING_EVENT_PREFIX)) != 0) return 0;
+
+    char name[USERNAME_MAX];
+    int active = 0;
+    if (sscanf(body + strlen(TYPING_EVENT_PREFIX), "%63s %d", name, &active) != 2) {
+        return 1;
+    }
+    set_typing_user(name, active != 0);
+    return 1;
+}
+
+static int clear_typing_from_chat(const char *raw) {
+    char tmp[MAX_MSG_LEN + 32];
+    snprintf(tmp, sizeof(tmp), "%s", raw);
+    ParsedLine line = parse_chat_line(tmp);
+    if (!line.is_chat) return 0;
+    return clear_typing_user(line.name);
+}
+
 static int wrapped_message_line_count(const char *message, int max_cols) {
     if (message[0] == '\0') return 1;
 
@@ -617,6 +714,7 @@ static int max_scroll_offset(void) {
     if (rows <= chat_h) return 0;
 
     int reserved_rows = chat_h > 1 ? 1 : 0;
+    if (typing_user_count() > 0 && chat_h - reserved_rows > 1) reserved_rows++;
     int visible_rows = chat_h - reserved_rows;
     if (visible_rows < 1) visible_rows = 1;
     return rows - visible_rows;
@@ -628,15 +726,59 @@ static void clamp_scroll_offset(void) {
     if (scroll_offset > max_scroll) scroll_offset = max_scroll;
 }
 
+static void chat_reserved_rows(int *top_rows, int *bottom_rows) {
+    *top_rows = scroll_offset > 0 && chat_h > 1 ? 1 : 0;
+    *bottom_rows = typing_user_count() > 0 && chat_h - *top_rows > 1 ? 1 : 0;
+}
+
+static void render_typing_indicator(int row) {
+    int count = typing_user_count();
+    if (count <= 0 || row < 0 || row >= chat_h) return;
+
+    char names[256] = "";
+    int shown = 0;
+    for (int i = 0; i < MAX_TYPING_USERS; i++) {
+        if (!typing_users[i].name[0]) continue;
+        if (shown < 2) {
+            if (names[0]) strncat(names, ", ", sizeof(names) - strlen(names) - 1);
+            strncat(names, typing_users[i].name, sizeof(names) - strlen(names) - 1);
+        }
+        shown++;
+    }
+    if (shown > 2) {
+        char more[32];
+        snprintf(more, sizeof(more), " +%d", shown - 2);
+        strncat(names, more, sizeof(names) - strlen(names) - 1);
+    }
+
+    char dots[] = "...";
+    int phase = (int)(time(NULL) % 3) + 1;
+    dots[phase] = '\0';
+
+    int h, w; getmaxyx(chat_win, h, w); (void)h;
+    if (w <= 0) return;
+    char line[320];
+    snprintf(line, sizeof(line), " %s %s", names, dots);
+    style_on(chat_win, CP_SYSTEM, A_DIM);
+    mvwaddnstr(chat_win, row, 0, line, w);
+    style_off(chat_win, CP_SYSTEM, A_DIM);
+}
+
 static void rerender_chat(void) {
     werase(chat_win);
     clamp_scroll_offset();
 
     int total_rows = total_rendered_rows();
-    if (total_rows <= 0) return;
+    int top_reserved = 0;
+    int bottom_reserved = 0;
+    chat_reserved_rows(&top_reserved, &bottom_reserved);
 
-    int reserved_rows = scroll_offset > 0 && chat_h > 1 ? 1 : 0;
-    int visible_rows = chat_h - reserved_rows;
+    if (total_rows <= 0) {
+        if (bottom_reserved > 0) render_typing_indicator(chat_h - 1);
+        return;
+    }
+
+    int visible_rows = chat_h - top_reserved - bottom_reserved;
     if (visible_rows < 1) visible_rows = 1;
 
     int start_row = total_rows - visible_rows - scroll_offset;
@@ -700,13 +842,15 @@ static void rerender_chat(void) {
         else wattroff(chat_win, A_REVERSE);
     }
 
-    int dest_top = reserved_rows;
+    int dest_top = top_reserved;
     int dest_bottom = dest_top + visible_rows - 1;
-    if (dest_bottom >= chat_h) dest_bottom = chat_h - 1;
+    int max_bottom = chat_h - bottom_reserved - 1;
+    if (dest_bottom > max_bottom) dest_bottom = max_bottom;
     if (dest_top <= dest_bottom && term_w > 0) {
         copywin(pad, chat_win, start_row, 0, dest_top, 0,
                 dest_bottom, term_w - 1, 0);
     }
+    if (bottom_reserved > 0) render_typing_indicator(chat_h - 1);
     delwin(pad);
 }
 
@@ -940,6 +1084,43 @@ static int send_text(const char *text, size_t len) {
     return 0;
 }
 
+static void send_typing_state(int active) {
+    if (sock_fd < 0) return;
+    char msg[sizeof(TYPING_CONTROL) + 4];
+    snprintf(msg, sizeof(msg), "%s %d", TYPING_CONTROL, active ? 1 : 0);
+    if (send_text(msg, strlen(msg)) == 0) {
+        local_typing_sent = active ? 1 : 0;
+        next_typing_refresh = active ? time(NULL) + TYPING_REFRESH_SECS : 0;
+    }
+}
+
+static void note_input_changed(void) {
+    time_t now = time(NULL);
+    if (input_len > 0) {
+        local_typing_deadline = now + TYPING_IDLE_SECS;
+        if (!local_typing_sent || now >= next_typing_refresh) {
+            send_typing_state(1);
+        }
+    } else if (local_typing_sent) {
+        send_typing_state(0);
+    }
+}
+
+static void tick_typing(void) {
+    time_t now = time(NULL);
+    int changed = prune_typing_users(now);
+    if (local_typing_sent && now >= local_typing_deadline) {
+        send_typing_state(0);
+    }
+    if (changed) rerender_chat();
+}
+
+static int typing_poll_timeout_ms(void) {
+    if (sock_fd < 0) return 1000;
+    if (local_typing_sent || typing_user_count() > 0) return 500;
+    return -1;
+}
+
 static void send_input(void) {
     if (input_len == 0) return;
     char mb[INPUT_WMAX * 4 + 1];
@@ -954,6 +1135,8 @@ static void send_input(void) {
     input_len = 0;
     input_cursor = 0;
     input_buf[0] = L'\0';
+    if (local_typing_sent) send_typing_state(0);
+    maybe_update_input_layout();
 }
 
 static int handle_socket_in(void) {
@@ -979,13 +1162,19 @@ static int handle_socket_in(void) {
                 memmove(recv_buf, recv_buf + consumed, recv_len - consumed);
                 recv_len -= consumed;
 
+                if (handle_typing_event(body)) {
+                    rerender_chat();
+                    continue;
+                }
+
                 int is_welcome = strcmp(body, "[system] welcome to localchat") == 0;
                 if (suppress_replay_duplicates && !is_welcome && log_contains(body)) {
                     continue;
                 }
+                int typing_changed = clear_typing_from_chat(body);
                 log_add(body);
                 if (is_welcome) suppress_replay_duplicates = 0;
-                if (scroll_offset == 0) rerender_chat();
+                if (scroll_offset == 0 || typing_changed) rerender_chat();
             }
             continue;
         }
@@ -1009,6 +1198,7 @@ static void insert_char(wchar_t wc) {
     input_len++;
     input_cursor++;
     input_buf[input_len] = L'\0';
+    note_input_changed();
 }
 
 static void insert_newline(void) {
@@ -1022,6 +1212,7 @@ static void delete_back(void) {
     input_cursor--;
     input_len--;
     input_buf[input_len] = L'\0';
+    note_input_changed();
 }
 
 static void delete_forward(void) {
@@ -1030,6 +1221,7 @@ static void delete_forward(void) {
             (size_t)(input_len - input_cursor - 1) * sizeof(wchar_t));
     input_len--;
     input_buf[input_len] = L'\0';
+    note_input_changed();
 }
 
 static void delete_word_back(void) {
@@ -1042,6 +1234,7 @@ static void delete_word_back(void) {
     input_len  -= input_cursor - p;
     input_cursor = p;
     input_buf[input_len] = L'\0';
+    note_input_changed();
 }
 
 static void scroll_by(int delta) {
@@ -1121,9 +1314,10 @@ static void process_keys(void) {
             else if (wc == 1)  { input_cursor = 0; }                            /* Ctrl-A */
             else if (wc == 5)  { input_cursor = input_len; }                    /* Ctrl-E */
             else if (wc == 21) { input_len = 0; input_cursor = 0;
-                                 input_buf[0] = L'\0'; }                        /* Ctrl-U */
+                                 input_buf[0] = L'\0'; note_input_changed(); }  /* Ctrl-U */
             else if (wc == 11) { input_len = input_cursor;
-                                 input_buf[input_len] = L'\0'; }                /* Ctrl-K */
+                                 input_buf[input_len] = L'\0';
+                                 note_input_changed(); }                        /* Ctrl-K */
             else if (wc == 23) { delete_word_back(); }                          /* Ctrl-W */
             else if (wc == 12) { rerender_chat(); }                             /* Ctrl-L */
             else if (wc == 4)  { exit_requested = 1; }                          /* Ctrl-D */
@@ -1201,6 +1395,10 @@ static void close_server_connection(void) {
     if (sock_fd >= 0) close(sock_fd);
     sock_fd = -1;
     recv_len = 0;
+    local_typing_sent = 0;
+    local_typing_deadline = 0;
+    next_typing_refresh = 0;
+    clear_all_typing_users();
 }
 
 static void mark_disconnected(void) {
@@ -1224,6 +1422,10 @@ static int try_reconnect(void) {
         recv_len = 0;
         suppress_replay_duplicates = log_count > 0;
         next_reconnect_at = 0;
+        if (input_len > 0) {
+            local_typing_deadline = now + TYPING_IDLE_SECS;
+            send_typing_state(1);
+        }
         return 1;
     }
 
@@ -1587,7 +1789,7 @@ int main(int argc, char **argv) {
             nfds++;
         }
 
-        int r = poll(pfds, nfds, sock_fd >= 0 ? -1 : 1000);
+        int r = poll(pfds, nfds, typing_poll_timeout_ms());
         if (r < 0) {
             if (errno == EINTR) continue;
             break;
@@ -1595,6 +1797,7 @@ int main(int argc, char **argv) {
 
         if (r == 0) {
             try_reconnect();
+            tick_typing();
             redraw_all();
             continue;
         }
@@ -1609,6 +1812,7 @@ int main(int argc, char **argv) {
         }
 
         if (sock_fd < 0) try_reconnect();
+        tick_typing();
         redraw_all();
     }
 

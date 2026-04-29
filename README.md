@@ -148,6 +148,10 @@ prefixes with the user's name (resolved from `SO_PEERCRED` on Linux or
 `getpeereid()` on macOS/BSD, then `getpwuid`) and broadcasts to all
 connected clients.
 
+Typing indicators are transient control messages: clients send
+`[localchat:typing] 1` or `0`, and the server forwards `[typing] username
+1` or `0` to other clients. These events are not stored in chat history.
+
 ## Linux Service Hardening
 
 `localchatd.service` runs the daemon with `NoNewPrivileges`,

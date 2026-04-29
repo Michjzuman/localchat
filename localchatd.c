@@ -6,7 +6,8 @@
  *
  * Wire format: 4-byte big-endian payload length, followed by payload bytes.
  * Server -> client payloads are formatted as "[username] body" or
- * "[system] body" (no trailing newline).
+ * "[system] body" (no trailing newline). Transient typing notifications use
+ * "[typing] username 1|0" and are not stored in history.
  */
 
 #define _GNU_SOURCE
@@ -51,10 +52,12 @@
 #define OUT_BUF_CAP         (64 * 1024)
 #define HISTORY_CAP         128
 #define HISTORY_REPLAY_CAP  (OUT_BUF_CAP - 4096)
+#define TYPING_CONTROL      "[localchat:typing]"
 
 typedef struct {
     int            fd;
     char           username[USERNAME_MAX];
+    int            typing;
     unsigned char  in_buf[IN_BUF_CAP];
     size_t         in_len;
     unsigned char *out_buf;
@@ -237,12 +240,19 @@ static void broadcast_text(const char *text, int except_idx) {
     }
 }
 
+static void broadcast_typing_name(const char *username, int active, int except_idx) {
+    char msg[USERNAME_MAX + 32];
+    snprintf(msg, sizeof(msg), "[typing] %s %d", username, active ? 1 : 0);
+    broadcast_text(msg, except_idx);
+}
+
 static void disconnect_client(int idx, const char *reason) {
     Client *c = &clients[idx];
     if (c->fd == -1) return;
 
     char left[USERNAME_MAX];
     snprintf(left, sizeof(left), "%s", c->username);
+    int was_typing = c->typing;
 
     close(c->fd);
     c->fd = -1;
@@ -255,6 +265,9 @@ static void disconnect_client(int idx, const char *reason) {
 
     if (left[0]) {
         char msg[USERNAME_MAX + 64];
+        if (was_typing) {
+            broadcast_typing_name(left, 0, idx);
+        }
         if (reason) {
             snprintf(msg, sizeof(msg), "[system] %s left (%s)", left, reason);
         } else {
@@ -301,6 +314,22 @@ static int process_in_buffer(int idx) {
             bstart++;
         }
         if (blen - bstart == 0) continue;
+
+        if (strncmp(body + bstart, TYPING_CONTROL, strlen(TYPING_CONTROL)) == 0) {
+            const char *state = body + bstart + strlen(TYPING_CONTROL);
+            while (*state == ' ' || *state == '\t') state++;
+            int active = *state == '1';
+            if (c->typing != active) {
+                c->typing = active;
+                broadcast_typing_name(c->username, active, idx);
+            }
+            continue;
+        }
+
+        if (c->typing) {
+            c->typing = 0;
+            broadcast_typing_name(c->username, 0, idx);
+        }
 
         char out[USERNAME_MAX + MAX_BODY_LEN + 8];
         snprintf(out, sizeof(out), "[%s] %s", c->username, body + bstart);

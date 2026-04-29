@@ -101,6 +101,7 @@ The ncurses UI follows `design.py`:
 - system messages are dim and centered
 - the top debug status line is hidden by default and shown with `--debug`;
   it stays compact: app name, local username, connection state, socket path
+- typing indicators are dim and transient near the bottom of the chat area
 
 Width is computed via `wcwidth`; chunking respects code-point boundaries and
 prefers wrapping at whitespace before hard-wrapping long words.
@@ -120,6 +121,9 @@ Length-prefixed binary framing on a Unix-domain stream socket:
   drops the client if a length prefix exceeds this.
 - Server → client payload: `[username] body` (chat) or `[system] body`
   (notifications). Max **8192** bytes total on the wire.
+- Typing indicators are transient control frames: client sends
+  `[localchat:typing] 1|0`, server forwards `[typing] username 1|0` to
+  other clients. They are never added to daemon history.
 
 Both sides sanitize control characters (kept: `\t` and `\n`; everything else
 under 0x20 or 0x7f is replaced with space). Usernames are sanitized to avoid
