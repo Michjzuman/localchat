@@ -96,10 +96,11 @@ The ncurses UI follows `design.py`:
 - other users' messages are left-aligned with the sender above the bubble
 - bubble borders use Unicode box-drawing characters
 - own messages use `❯`, others use `❮`
-- the input area is a three-line boxed field with an `⏎` marker
+- the input area is a boxed field with an `⏎` marker and grows modestly for
+  explicit newlines
 - system messages are dim and centered
-- the top status line stays compact: app name, local username, connection
-  state, socket path
+- the top debug status line is hidden by default and shown with `--debug`;
+  it stays compact: app name, local username, connection state, socket path
 
 Width is computed via `wcwidth`; chunking respects code-point boundaries and
 prefers wrapping at whitespace before hard-wrapping long words.
@@ -120,8 +121,8 @@ Length-prefixed binary framing on a Unix-domain stream socket:
 - Server → client payload: `[username] body` (chat) or `[system] body`
   (notifications). Max **8192** bytes total on the wire.
 
-Both sides sanitize control characters (kept: `\t`; everything else under
-0x20 or 0x7f is replaced with space). Usernames are sanitized to avoid
+Both sides sanitize control characters (kept: `\t` and `\n`; everything else
+under 0x20 or 0x7f is replaced with space). Usernames are sanitized to avoid
 `[`, `]`, whitespace, or control chars.
 
 ## Hardening

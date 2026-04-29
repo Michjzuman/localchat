@@ -65,6 +65,8 @@ static const char    *socket_path = DEFAULT_SOCKET_PATH;
 static int            term_h = 0;
 static int            term_w = 0;
 static int            chat_h = 0;
+static int            input_h = 3;
+static int            debug_enabled = 0;
 static int            colors_enabled = 0;
 static int            suppress_replay_duplicates = 0;
 static time_t         next_reconnect_at = 0;
@@ -141,15 +143,6 @@ static int wcs_to_mb(const wchar_t *src, size_t n, char *out, size_t out_cap) {
     return (int)total;
 }
 
-static int wcs_columns(const wchar_t *s, int n) {
-    int cols = 0;
-    for (int i = 0; i < n; i++) {
-        int w = wcwidth(s[i]);
-        if (w > 0) cols += w;
-    }
-    return cols;
-}
-
 static void init_color_pairs(void) {
     if (color_mode == COLOR_NEVER) return;
     if (!has_colors() || start_color() == ERR) return;
@@ -200,6 +193,7 @@ static int max_message_columns(void) {
 }
 
 static void render_status(void) {
+    if (!debug_enabled) return;
     if (!status_win) return;
     int h, w; getmaxyx(status_win, h, w); (void)h;
     werase(status_win);
@@ -300,6 +294,13 @@ static int next_message_chunk(const char **cursor, int max_cols,
     int cols = 0;
 
     if (*p == '\0') return 0;
+    if (*p == '\n') {
+        *cursor = p + 1;
+        *chunk_start = p;
+        *chunk_len = 0;
+        *chunk_cols = 0;
+        return 1;
+    }
     while (*p) {
         wchar_t wc;
         size_t r = mbrtowc(&wc, p, MB_CUR_MAX, &st);
@@ -312,6 +313,10 @@ static int next_message_chunk(const char **cursor, int max_cols,
             continue;
         }
         if (r == 0) break;
+        if (wc == L'\n') {
+            p += r;
+            break;
+        }
         int cw = wcwidth(wc);
         if (cw < 0) cw = 1;
         if (cols + cw > max_cols && end > start) {
@@ -322,7 +327,7 @@ static int next_message_chunk(const char **cursor, int max_cols,
             }
             break;
         }
-        if (iswspace(wc) && end > start) {
+        if (iswspace(wc) && wc != L'\n' && end > start) {
             last_break = p + r;
             last_break_trim = p;
             last_break_cols = cols;
@@ -705,77 +710,201 @@ static void rerender_chat(void) {
     delwin(pad);
 }
 
+typedef struct {
+    int start;
+    int end;
+    int cols;
+} InputLine;
+
+static int input_cols_for_width(int w) {
+    int cols = w - 5;
+    return cols > 0 ? cols : 1;
+}
+
+static int build_input_lines(InputLine *lines, int cap, int input_cols,
+                             int *cursor_line, int *cursor_col) {
+    int count = 0;
+    int start = 0;
+    int col = 0;
+    int i = 0;
+    int cursor_set = 0;
+
+    if (input_cols < 1) input_cols = 1;
+    while (i < input_len && count < cap - 1) {
+        if (!cursor_set && i == input_cursor) {
+            *cursor_line = count;
+            *cursor_col = col;
+            cursor_set = 1;
+        }
+
+        wchar_t wc = input_buf[i];
+        if (wc == L'\n') {
+            lines[count++] = (InputLine){ .start = start, .end = i, .cols = col };
+            i++;
+            start = i;
+            col = 0;
+            continue;
+        }
+
+        int cw = wcwidth(wc);
+        if (cw < 0) cw = 1;
+        if (col + cw > input_cols && i > start) {
+            lines[count++] = (InputLine){ .start = start, .end = i, .cols = col };
+            start = i;
+            col = 0;
+            continue;
+        }
+
+        col += cw;
+        i++;
+    }
+
+    if (!cursor_set) {
+        *cursor_line = count;
+        *cursor_col = col;
+    }
+    lines[count++] = (InputLine){ .start = start, .end = input_len, .cols = col };
+    return count;
+}
+
+static int max_input_window_height(void) {
+    int status_rows = debug_enabled ? 1 : 0;
+    int available = term_h - status_rows - 1;
+    int max_h = 7;
+    if (available >= 3 && max_h > available) max_h = available;
+    if (max_h < 3) max_h = 3;
+    return max_h;
+}
+
+static int desired_input_window_height(void) {
+    InputLine lines[INPUT_WMAX + 2];
+    int cursor_line = 0;
+    int cursor_col = 0;
+    int cols = input_cols_for_width(term_w);
+    int line_count = build_input_lines(lines, INPUT_WMAX + 2, cols,
+                                       &cursor_line, &cursor_col);
+    (void)lines;
+    (void)cursor_line;
+    (void)cursor_col;
+    int desired = line_count + 2;
+    if (desired < 3) desired = 3;
+    int max_h = max_input_window_height();
+    if (desired > max_h) desired = max_h;
+    return desired;
+}
+
+static int recreate_windows(void) {
+    int status_rows = debug_enabled ? 1 : 0;
+
+    if (status_win) { delwin(status_win); status_win = NULL; }
+    if (chat_win) { delwin(chat_win); chat_win = NULL; }
+    if (input_win) { delwin(input_win); input_win = NULL; }
+
+    chat_h = term_h - status_rows - input_h;
+    if (chat_h < 1) chat_h = 1;
+
+    if (debug_enabled) {
+        status_win = newwin(1, term_w, 0, 0);
+        if (!status_win) return 0;
+    }
+    chat_win = newwin(chat_h, term_w, status_rows, 0);
+    input_win = newwin(input_h, term_w, status_rows + chat_h, 0);
+    if (!chat_win || !input_win) return 0;
+
+    scrollok(chat_win, FALSE);
+    keypad(input_win, TRUE);
+    nodelay(input_win, TRUE);
+    return 1;
+}
+
+static void maybe_update_input_layout(void) {
+    if (!input_win || term_h <= 0 || term_w <= 0) return;
+    int desired = desired_input_window_height();
+    if (desired == input_h) return;
+    input_h = desired;
+    if (recreate_windows()) rerender_chat();
+}
+
 static void render_input(void) {
-    int h, w; getmaxyx(input_win, h, w); (void)h;
+    int h, w; getmaxyx(input_win, h, w);
     werase(input_win);
-    if (w < 6) {
+    if (w < 6 || h < 3) {
         style_on(input_win, CP_INPUT, A_DIM);
         box(input_win, 0, 0);
         style_off(input_win, CP_INPUT, A_DIM);
         wnoutrefresh(input_win);
         return;
     }
+
     style_on(input_win, CP_INPUT, A_DIM);
     mvwaddstr(input_win, 0, 0, "╭");
     put_repeat(input_win, "─", w - 2);
     waddstr(input_win, "╮");
-
-    mvwaddstr(input_win, 1, 0, "│");
-    put_spaces(input_win, w - 2);
-    mvwaddstr(input_win, 1, w - 1, "│");
-
-    mvwaddstr(input_win, 2, 0, "╰");
+    for (int y = 1; y < h - 1; y++) {
+        mvwaddstr(input_win, y, 0, "│");
+        put_spaces(input_win, w - 2);
+        mvwaddstr(input_win, y, w - 1, "│");
+    }
+    mvwaddstr(input_win, h - 1, 0, "╰");
     put_repeat(input_win, "─", w - 2);
     waddstr(input_win, "╯");
     style_off(input_win, CP_INPUT, A_DIM);
 
+    int input_cols = input_cols_for_width(w);
+    InputLine lines[INPUT_WMAX + 2];
+    int cursor_line = 0;
+    int cursor_col = 0;
+    int line_count = build_input_lines(lines, INPUT_WMAX + 2, input_cols,
+                                       &cursor_line, &cursor_col);
+    int rows = h - 2;
+    int top_line = 0;
+    if (line_count > rows) {
+        top_line = cursor_line - rows + 1;
+        if (top_line < 0) top_line = 0;
+        if (top_line > line_count - rows) top_line = line_count - rows;
+    }
+
+    for (int row = 0; row < rows; row++) {
+        int line_idx = top_line + row;
+        if (line_idx >= line_count) break;
+
+        int x = 2;
+        for (int i = lines[line_idx].start; i < lines[line_idx].end; i++) {
+            wchar_t wc = input_buf[i];
+            if (wc == L'\n') continue;
+            int cw = wcwidth(wc);
+            if (cw < 0) cw = 1;
+            if (x - 2 + cw > input_cols) break;
+
+            char tmp[MB_LEN_MAX + 1];
+            mbstate_t st; memset(&st, 0, sizeof(st));
+            size_t n = wcrtomb(tmp, wc, &st);
+            if (n != (size_t)-1) {
+                tmp[n] = '\0';
+                style_on(input_win, CP_INPUT, 0);
+                mvwaddstr(input_win, 1 + row, x, tmp);
+                style_off(input_win, CP_INPUT, 0);
+            }
+            x += cw;
+        }
+    }
+
     style_on(input_win, CP_INPUT_MARK, A_BOLD);
-    mvwaddstr(input_win, 1, w - 3, "⏎");
+    mvwaddstr(input_win, h - 2, w - 3, "⏎");
     style_off(input_win, CP_INPUT_MARK, A_BOLD);
 
-    int input_cols = w - 5;
-    if (input_cols < 1) input_cols = 1;
-
-    int cursor_col = wcs_columns(input_buf, input_cursor);
-    int scroll = 0;
-    if (cursor_col >= input_cols) scroll = cursor_col - input_cols + 1;
-
-    int sw = 0, sc = 0;
-    while (sw < input_len && sc < scroll) {
-        int cw = wcwidth(input_buf[sw]);
-        if (cw < 0) cw = 1;
-        if (sc + cw > scroll) break;
-        sc += cw;
-        sw++;
-    }
-
-    int visible = 0;
-    int wi = sw;
-    while (wi < input_len) {
-        int cw = wcwidth(input_buf[wi]);
-        if (cw < 0) cw = 1;
-        if (visible + cw > input_cols) break;
-        char tmp[MB_LEN_MAX + 1];
-        mbstate_t st; memset(&st, 0, sizeof(st));
-        size_t n = wcrtomb(tmp, input_buf[wi], &st);
-        if (n != (size_t)-1) {
-            tmp[n] = '\0';
-            style_on(input_win, CP_INPUT, 0);
-            mvwaddstr(input_win, 1, 2 + visible, tmp);
-            style_off(input_win, CP_INPUT, 0);
-        }
-        visible += cw;
-        wi++;
-    }
-
-    int cur_x = 2 + (cursor_col - sc);
+    int cur_y = 1 + cursor_line - top_line;
+    if (cur_y < 1) cur_y = 1;
+    if (cur_y > h - 2) cur_y = h - 2;
+    int cur_x = 2 + cursor_col;
     if (cur_x > w - 4) cur_x = w - 4;
-    if (cur_x < 2)     cur_x = 2;
-    wmove(input_win, 1, cur_x);
+    if (cur_x < 2) cur_x = 2;
+    wmove(input_win, cur_y, cur_x);
     wnoutrefresh(input_win);
 }
 
 static void redraw_all(void) {
+    maybe_update_input_layout();
     render_status();
     wnoutrefresh(chat_win);
     render_input();
@@ -871,8 +1000,8 @@ static int handle_socket_in(void) {
 
 static void insert_char(wchar_t wc) {
     if (input_len >= INPUT_WMAX) return;
-    if (wc < 0x20 && wc != L'\t') return;
-    int w = wcwidth(wc);
+    if (wc < 0x20 && wc != L'\t' && wc != L'\n') return;
+    int w = wc == L'\n' ? 0 : wcwidth(wc);
     if (w < 0) return;
     memmove(input_buf + input_cursor + 1, input_buf + input_cursor,
             (size_t)(input_len - input_cursor) * sizeof(wchar_t));
@@ -880,6 +1009,10 @@ static void insert_char(wchar_t wc) {
     input_len++;
     input_cursor++;
     input_buf[input_len] = L'\0';
+}
+
+static void insert_newline(void) {
+    insert_char(L'\n');
 }
 
 static void delete_back(void) {
@@ -930,6 +1063,32 @@ static void scroll_page_down(void) {
 
 static void handle_resize(void);
 
+static int is_shift_enter_sequence(const char *seq) {
+    return strcmp(seq, "[13;2u") == 0 ||
+           strcmp(seq, "[13;2~") == 0 ||
+           strcmp(seq, "[27;2;13~") == 0;
+}
+
+static void handle_escape_sequence(void) {
+    char seq[32];
+    int len = 0;
+
+    wtimeout(input_win, 25);
+    while (len < (int)sizeof(seq) - 1) {
+        wint_t next;
+        int r = wget_wch(input_win, &next);
+        if (r == ERR) break;
+        if (r == KEY_CODE_YES) break;
+        if (next < 0 || next > 0x7f) break;
+        seq[len++] = (char)next;
+        if (next == L'~' || next == L'u') break;
+    }
+    wtimeout(input_win, 0);
+    seq[len] = '\0';
+
+    if (is_shift_enter_sequence(seq)) insert_newline();
+}
+
 static void process_keys(void) {
     while (1) {
         wint_t wc;
@@ -949,11 +1108,15 @@ static void process_keys(void) {
                 case KEY_PPAGE:     scroll_page_up();   break;
                 case KEY_NPAGE:     scroll_page_down(); break;
                 case KEY_RESIZE:    handle_resize(); break;
+#ifdef KEY_SENTER
+                case KEY_SENTER:    insert_newline(); break;
+#endif
                 case KEY_ENTER:     send_input();    break;
                 default: break;
             }
         } else {
             if (wc == L'\n' || wc == L'\r') { send_input(); }
+            else if (wc == 27) { handle_escape_sequence(); }
             else if (wc == 127 || wc == L'\b') { delete_back(); }
             else if (wc == 1)  { input_cursor = 0; }                            /* Ctrl-A */
             else if (wc == 5)  { input_cursor = input_len; }                    /* Ctrl-E */
@@ -974,17 +1137,8 @@ static void handle_resize(void) {
     endwin();
     refresh();
     getmaxyx(stdscr, term_h, term_w);
-    chat_h = term_h - 4;
-    if (chat_h < 1) chat_h = 1;
-    if (status_win) delwin(status_win);
-    if (chat_win) delwin(chat_win);
-    if (input_win) delwin(input_win);
-    status_win = newwin(1, term_w, 0, 0);
-    chat_win  = newwin(chat_h, term_w, 1, 0);
-    input_win = newwin(3, term_w, chat_h + 1, 0);
-    if (chat_win)  scrollok(chat_win, FALSE);
-    if (input_win) { keypad(input_win, TRUE); nodelay(input_win, TRUE); }
-    rerender_chat();
+    input_h = desired_input_window_height();
+    if (recreate_windows()) rerender_chat();
     redraw_all();
 }
 
@@ -1283,11 +1437,12 @@ static void usage(FILE *out) {
         "  -s, --socket PATH    Socket path (default: %s).\n"
         "      --color MODE     Color mode: auto, always, never.\n"
         "      --no-color       Disable colors.\n"
+        "      --debug          Show connection status line.\n"
         "  -h, --help           Show this help and exit.\n"
         "      --version        Show version and exit.\n"
         "\n"
         "Keys:\n"
-        "  Enter         send message\n"
+        "  Enter         send message      Shift-Enter insert newline\n"
         "  ←/→           move cursor       Home/End  start/end of input\n"
         "  Backspace/Del edit              Ctrl-W    delete word back\n"
         "  Ctrl-U/Ctrl-K clear / kill EOL  Ctrl-L    redraw\n"
@@ -1334,6 +1489,8 @@ int main(int argc, char **argv) {
             socket_path = argv[++i];
         } else if (strcmp(a, "--no-color") == 0) {
             color_mode = COLOR_NEVER;
+        } else if (strcmp(a, "--debug") == 0) {
+            debug_enabled = 1;
         } else if (strncmp(a, "--color=", 8) == 0) {
             if (parse_color_mode(a + 8) != 0) {
                 fprintf(stderr, "invalid color mode: %s\n", a + 8);
@@ -1386,20 +1543,13 @@ int main(int argc, char **argv) {
     init_color_pairs();
 
     getmaxyx(stdscr, term_h, term_w);
-    chat_h = term_h - 4;
-    if (chat_h < 1) chat_h = 1;
-    status_win = newwin(1, term_w, 0, 0);
-    chat_win  = newwin(chat_h, term_w, 1, 0);
-    input_win = newwin(3, term_w, chat_h + 1, 0);
-    if (!status_win || !chat_win || !input_win) {
+    input_h = desired_input_window_height();
+    if (!recreate_windows()) {
         endwin();
         close(sock_fd);
         fprintf(stderr, "failed to create ncurses windows\n");
         return 1;
     }
-    scrollok(chat_win, FALSE);
-    keypad(input_win, TRUE);
-    nodelay(input_win, TRUE);
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));

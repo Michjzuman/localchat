@@ -93,6 +93,7 @@ daemon.
 | Key                | Action                       |
 |--------------------|------------------------------|
 | Enter              | send message                 |
+| Shift-Enter        | insert newline               |
 | ←/→                | move cursor                  |
 | ↑/↓                | scroll back / forward (line) |
 | Home / End         | start / end of input         |
@@ -107,7 +108,7 @@ daemon.
 
 ```text
 localchat [--socket PATH] [--color auto|always|never] [--no-color]
-          [--version] [--help]
+          [--debug] [--version] [--help]
 localchat update                 # download and run the Linux installer (root)
 localchat update --check         # compare installed and latest versions
 localchat status                 # show localchatd status
@@ -142,9 +143,10 @@ A trivial length-prefixed framing on a Unix domain socket:
 
 Server-to-client payloads are formatted as `[username] body` for chat
 messages and `[system] body` for notifications. Client-to-server payloads
-are the raw message body (max 4096 bytes). The server prefixes with the
-user's name (resolved from `SO_PEERCRED` on Linux or `getpeereid()` on
-macOS/BSD, then `getpwuid`) and broadcasts to all connected clients.
+are the raw message body (max 4096 bytes, newlines allowed). The server
+prefixes with the user's name (resolved from `SO_PEERCRED` on Linux or
+`getpeereid()` on macOS/BSD, then `getpwuid`) and broadcasts to all
+connected clients.
 
 ## Linux Service Hardening
 

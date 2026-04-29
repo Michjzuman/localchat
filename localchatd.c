@@ -106,7 +106,7 @@ static int set_cloexec(int fd) {
 static void sanitize_text(char *s, size_t n) {
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
-        if (c == '\t') continue;
+        if (c == '\t' || c == '\n') continue;
         if (c < 0x20 || c == 0x7f) s[i] = ' ';
     }
 }

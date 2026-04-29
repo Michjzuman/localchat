@@ -76,15 +76,15 @@ def send_frame(sock, text):
 first = connect_client()
 assert recv_frame(first) == "[system] welcome to localchat"
 
-send_frame(first, "hello history")
+send_frame(first, "hello\nhistory")
 own_echo = recv_frame(first)
-assert own_echo.endswith("hello history"), own_echo
+assert own_echo.endswith("hello\nhistory"), own_echo
 
 second = connect_client()
 history = recv_frame(second)
 welcome = recv_frame(second)
 
-assert history.endswith("hello history"), (history, welcome)
+assert history.endswith("hello\nhistory"), (history, welcome)
 assert welcome == "[system] welcome to localchat", (history, welcome)
 
 first.close()
