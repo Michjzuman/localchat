@@ -97,8 +97,7 @@ body::before {
   inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(circle at 50% 52%, transparent 0 42%, rgba(0, 0, 0, 0.18) 76%),
-    linear-gradient(90deg, transparent 0 49.7%, rgba(143, 214, 123, 0.2) 50%, transparent 50.3%);
+    radial-gradient(circle at 50% 52%, transparent 0 42%, rgba(0, 0, 0, 0.18) 76%);
   opacity: 0.58;
 }
 
