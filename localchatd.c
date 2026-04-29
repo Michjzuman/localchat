@@ -1,8 +1,8 @@
 /*
  * localchatd - localchat server daemon
  *
- * Listens on a UNIX domain socket, identifies clients via SO_PEERCRED, and
- * forwards length-prefixed text messages between connected users.
+ * Listens on a UNIX domain socket, identifies clients via peer credentials,
+ * and forwards length-prefixed text messages between connected users.
  *
  * Wire format: 4-byte big-endian payload length, followed by payload bytes.
  * Server -> client payloads are formatted as "[username] body" or
@@ -10,6 +10,7 @@
  */
 
 #define _GNU_SOURCE
+#define _DARWIN_C_SOURCE
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -24,16 +25,23 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
 
-#if !defined(__linux__)
-#  error "localchatd requires Linux (SO_PEERCRED, struct ucred)."
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(__FreeBSD__) && \
+    !defined(__NetBSD__) && !defined(__OpenBSD__)
+#  error "localchatd requires Linux SO_PEERCRED or BSD/macOS getpeereid."
 #endif
 
 #define VERSION             "1.1.0"
-#define DEFAULT_SOCKET_PATH "/run/localchat/socket"
-#define LEGACY_SOCKET_PATH  "/run/localchat.sock"
+#if defined(__linux__)
+#  define DEFAULT_SOCKET_PATH "/run/localchat/socket"
+#  define LEGACY_SOCKET_PATH  "/run/localchat.sock"
+#else
+#  define DEFAULT_SOCKET_PATH "/tmp/localchat.sock"
+#  define LEGACY_SOCKET_PATH  "/tmp/localchat.sock"
+#endif
 #define MAX_CLIENTS         64
 #define MAX_MSG_LEN         8192
 #define MAX_BODY_LEN        4096
@@ -112,17 +120,34 @@ static void sanitize_username(char *s) {
     }
 }
 
-static void resolve_username(int fd, char *out, size_t cap) {
+static int peer_uid(int fd, uid_t *uid) {
+#if defined(__linux__)
     struct ucred cred;
     socklen_t len = sizeof(cred);
     if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == -1) {
+        return -1;
+    }
+    *uid = cred.uid;
+    return 0;
+#else
+    gid_t gid;
+    if (getpeereid(fd, uid, &gid) == -1) {
+        return -1;
+    }
+    return 0;
+#endif
+}
+
+static void resolve_username(int fd, char *out, size_t cap) {
+    uid_t uid;
+    if (peer_uid(fd, &uid) == -1) {
         snprintf(out, cap, "unknown");
     } else {
-        struct passwd *pw = getpwuid(cred.uid);
+        struct passwd *pw = getpwuid(uid);
         if (pw && pw->pw_name && pw->pw_name[0]) {
             snprintf(out, cap, "%s", pw->pw_name);
         } else {
-            snprintf(out, cap, "uid-%u", (unsigned)cred.uid);
+            snprintf(out, cap, "uid-%u", (unsigned)uid);
         }
     }
     sanitize_username(out);
@@ -158,7 +183,8 @@ static int queue_msg(Client *c, const char *text) {
     return 0;
 }
 
-static void history_add(const char *text) {
+static void history_add_chat(const char *text) {
+    /* Replay only user chat, not join/leave/status notifications. */
     size_t len = strlen(text);
     if (len > MAX_MSG_LEN) len = MAX_MSG_LEN;
 
@@ -278,7 +304,7 @@ static int process_in_buffer(int idx) {
 
         char out[USERNAME_MAX + MAX_BODY_LEN + 8];
         snprintf(out, sizeof(out), "[%s] %s", c->username, body + bstart);
-        history_add(out);
+        history_add_chat(out);
         broadcast_text(out, -1);
     }
 }

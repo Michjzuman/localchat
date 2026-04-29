@@ -133,7 +133,7 @@ if [ "${EUID:-$(id -u)}" -ne 0 ]; then
 fi
 
 if [ "$(uname -s)" != "Linux" ]; then
-    die "localchat requires Linux, systemd, and SO_PEERCRED."
+    die "the installer manages the Linux/systemd service. On macOS, build manually with: make && sudo make install"
 fi
 
 if ! command -v systemctl >/dev/null 2>&1; then

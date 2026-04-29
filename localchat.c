@@ -2,11 +2,12 @@
  * localchat - ncurses chat client for the localchat daemon.
  *
  * Single-threaded; uses poll() over stdin and the daemon socket and renders
- * via ncursesw for proper UTF-8 / wide-character support. Messages are
+ * via ncurses/ncursesw for UTF-8 / wide-character support. Messages are
  * length-prefixed (4-byte big-endian) on the wire.
  */
 
 #define _GNU_SOURCE
+#define _DARWIN_C_SOURCE
 #define _XOPEN_SOURCE_EXTENDED 1
 
 #include <arpa/inet.h>
@@ -26,14 +27,25 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <wchar.h>
 #include <wctype.h>
 
 #define VERSION             "1.1.0"
-#define DEFAULT_SOCKET_PATH "/run/localchat/socket"
-#define LEGACY_SOCKET_PATH  "/run/localchat.sock"
+#if defined(__linux__)
+#  define DEFAULT_SOCKET_PATH "/run/localchat/socket"
+#  define LEGACY_SOCKET_PATH  "/run/localchat.sock"
+#  define HAVE_SYSTEMD_COMMANDS 1
+#  define HAVE_LEGACY_SOCKET   1
+#else
+#  define DEFAULT_SOCKET_PATH "/tmp/localchat.sock"
+#  define LEGACY_SOCKET_PATH  "/tmp/localchat.sock"
+#  define HAVE_SYSTEMD_COMMANDS 0
+#  define HAVE_LEGACY_SOCKET   0
+#endif
 #define INSTALL_URL         "https://localchat.michjzuman.com/install.sh"
+#define REMOTE_CLIENT_URL   "https://raw.githubusercontent.com/michjzuman/localchat/main/localchat.c"
 #define MAX_MSG_LEN         8192
 #define MAX_BODY_LEN        4096
 #define LEN_PREFIX_BYTES    4
@@ -43,6 +55,7 @@
 #define BUBBLE_WRAP_COLS    64
 
 static int            sock_fd = -1;
+static WINDOW        *status_win = NULL;
 static WINDOW        *chat_win  = NULL;
 static WINDOW        *input_win = NULL;
 static char           local_username[USERNAME_MAX];
@@ -52,6 +65,8 @@ static int            term_h = 0;
 static int            term_w = 0;
 static int            chat_h = 0;
 static int            colors_enabled = 0;
+static int            suppress_replay_duplicates = 0;
+static time_t         next_reconnect_at = 0;
 
 static unsigned char  recv_buf[LEN_PREFIX_BYTES + MAX_MSG_LEN + 16];
 static size_t         recv_len = 0;
@@ -85,6 +100,14 @@ enum {
     CP_INPUT_MARK,
     CP_SCROLL
 };
+
+enum {
+    COLOR_AUTO = 0,
+    COLOR_ALWAYS,
+    COLOR_NEVER
+};
+
+static int color_mode = COLOR_AUTO;
 
 /* ---------- low-level helpers ---------- */
 
@@ -127,6 +150,7 @@ static int wcs_columns(const wchar_t *s, int n) {
 }
 
 static void init_color_pairs(void) {
+    if (color_mode == COLOR_NEVER) return;
     if (!has_colors() || start_color() == ERR) return;
     if (COLOR_PAIRS <= CP_SCROLL) return;
 
@@ -172,6 +196,29 @@ static int max_message_columns(void) {
     else cols = 1;
     if (cols > BUBBLE_WRAP_COLS) cols = BUBBLE_WRAP_COLS;
     return cols;
+}
+
+static void render_status(void) {
+    if (!status_win) return;
+    int h, w; getmaxyx(status_win, h, w); (void)h;
+    werase(status_win);
+    if (w <= 0) return;
+
+    const char *state = sock_fd >= 0 ? "connected" : "reconnecting";
+    char line[512];
+    snprintf(line, sizeof(line), " localchat | %s | %s | %s",
+             local_username, state, socket_path);
+    int pair = sock_fd >= 0 ? CP_INPUT_MARK : CP_SYSTEM;
+    style_on(status_win, pair, A_BOLD);
+    mvwaddnstr(status_win, 0, 0, " localchat ", w);
+    style_off(status_win, pair, A_BOLD);
+
+    if (w > 11) {
+        style_on(status_win, CP_INPUT, A_DIM);
+        mvwaddnstr(status_win, 0, 11, line + 11, w - 11);
+        style_off(status_win, CP_INPUT, A_DIM);
+    }
+    wnoutrefresh(status_win);
 }
 
 static void load_local_username(void) {
@@ -238,8 +285,12 @@ static int next_message_chunk(const char **cursor, int max_cols,
                               int *chunk_cols) {
     mbstate_t st; memset(&st, 0, sizeof(st));
     const char *p = *cursor;
+    while (*p == ' ' || *p == '\t') p++;
     const char *start = p;
     const char *end = p;
+    const char *last_break = NULL;
+    const char *last_break_trim = NULL;
+    int last_break_cols = 0;
     int cols = 0;
 
     if (*p == '\0') return 0;
@@ -257,7 +308,19 @@ static int next_message_chunk(const char **cursor, int max_cols,
         if (r == 0) break;
         int cw = wcwidth(wc);
         if (cw < 0) cw = 1;
-        if (cols + cw > max_cols && end > start) break;
+        if (cols + cw > max_cols && end > start) {
+            if (last_break && last_break_trim > start) {
+                end = last_break_trim;
+                cols = last_break_cols;
+                p = last_break;
+            }
+            break;
+        }
+        if (iswspace(wc) && end > start) {
+            last_break = p + r;
+            last_break_trim = p;
+            last_break_cols = cols;
+        }
         cols += cw;
         p += r;
         end = p;
@@ -265,7 +328,7 @@ static int next_message_chunk(const char **cursor, int max_cols,
     }
 
     if (end == start) return 0;
-    *cursor = end;
+    *cursor = p;
     *chunk_start = start;
     *chunk_len = (size_t)(end - start);
     *chunk_cols = cols;
@@ -456,6 +519,15 @@ static void log_add(const char *raw) {
     log_count++;
 }
 
+static int log_contains(const char *raw) {
+    int oldest = log_count > LOG_CAP ? log_count - LOG_CAP : 0;
+    for (int i = oldest; i < log_count; i++) {
+        const char *line = log_lines[i % LOG_CAP];
+        if (line && strcmp(line, raw) == 0) return 1;
+    }
+    return 0;
+}
+
 static int oldest_log_index(void) {
     return log_count > LOG_CAP ? log_count - LOG_CAP : 0;
 }
@@ -498,7 +570,7 @@ static int rendered_log_rows(int idx) {
     ParsedLine cur = parse_chat_line(tmp);
     if (!cur.is_chat) {
         int h, w; getmaxyx(chat_win, h, w); (void)h;
-        int cols = mb_columns(tmp);
+        int cols = mb_columns(display_system_text(tmp));
         if (w <= 0) return 1;
         return cols > 0 ? (cols + w - 1) / w : 1;
     }
@@ -679,6 +751,7 @@ static void render_input(void) {
 }
 
 static void redraw_all(void) {
+    render_status();
     wnoutrefresh(chat_win);
     render_input();
     doupdate();
@@ -687,6 +760,7 @@ static void redraw_all(void) {
 /* ---------- I/O ---------- */
 
 static int send_text(const char *text, size_t len) {
+    if (sock_fd < 0) return -1;
     if (len == 0 || len > MAX_BODY_LEN) return -1;
     unsigned char buf[LEN_PREFIX_BYTES + MAX_BODY_LEN];
     uint32_t netlen = htonl((uint32_t)len);
@@ -752,7 +826,12 @@ static int handle_socket_in(void) {
                 memmove(recv_buf, recv_buf + consumed, recv_len - consumed);
                 recv_len -= consumed;
 
+                int is_welcome = strcmp(body, "[system] welcome to localchat") == 0;
+                if (suppress_replay_duplicates && !is_welcome && log_contains(body)) {
+                    continue;
+                }
                 log_add(body);
+                if (is_welcome) suppress_replay_duplicates = 0;
                 if (scroll_offset == 0) rerender_chat();
             }
             continue;
@@ -871,12 +950,14 @@ static void handle_resize(void) {
     endwin();
     refresh();
     getmaxyx(stdscr, term_h, term_w);
-    chat_h = term_h - 3;
+    chat_h = term_h - 4;
     if (chat_h < 1) chat_h = 1;
+    if (status_win) delwin(status_win);
     if (chat_win) delwin(chat_win);
     if (input_win) delwin(input_win);
-    chat_win  = newwin(chat_h, term_w, 0, 0);
-    input_win = newwin(3, term_w, chat_h, 0);
+    status_win = newwin(1, term_w, 0, 0);
+    chat_win  = newwin(chat_h, term_w, 1, 0);
+    input_win = newwin(3, term_w, chat_h + 1, 0);
     if (chat_win)  scrollok(chat_win, TRUE);
     if (input_win) { keypad(input_win, TRUE); nodelay(input_win, TRUE); }
     rerender_chat();
@@ -906,27 +987,70 @@ static int connect_unix(const char *path) {
     return fd;
 }
 
-static int connect_server(void) {
+static int connect_server(int verbose) {
     int fd = connect_unix(socket_path);
     if (fd >= 0) return fd;
     int e = errno;
 
+#if HAVE_LEGACY_SOCKET
     /* Fall back to legacy path if the user did not override -s. */
     if (strcmp(socket_path, DEFAULT_SOCKET_PATH) == 0) {
         struct stat st;
         if (stat(LEGACY_SOCKET_PATH, &st) == 0) {
             int fd2 = connect_unix(LEGACY_SOCKET_PATH);
             if (fd2 >= 0) {
-                fprintf(stderr, "note: using legacy socket %s\n", LEGACY_SOCKET_PATH);
+                if (verbose) fprintf(stderr, "note: using legacy socket %s\n", LEGACY_SOCKET_PATH);
                 return fd2;
             }
         }
     }
+#endif
 
-    fprintf(stderr, "could not connect to %s: %s\n", socket_path, strerror(e));
-    fprintf(stderr, "is the localchatd service running?\n");
-    fprintf(stderr, "  localchat status\n");
+    if (verbose) {
+        fprintf(stderr, "could not connect to %s: %s\n", socket_path, strerror(e));
+#if HAVE_SYSTEMD_COMMANDS
+        fprintf(stderr, "is the localchatd service running?\n");
+        fprintf(stderr, "  localchat status\n");
+#else
+        fprintf(stderr, "start the daemon in another terminal:\n");
+        fprintf(stderr, "  localchatd --socket %s\n", socket_path);
+#endif
+    }
     return -1;
+}
+
+static void close_server_connection(void) {
+    if (sock_fd >= 0) close(sock_fd);
+    sock_fd = -1;
+    recv_len = 0;
+}
+
+static void mark_disconnected(void) {
+    close_server_connection();
+    suppress_replay_duplicates = 0;
+    next_reconnect_at = time(NULL);
+    log_add("[system] disconnected from server");
+    scroll_offset = 0;
+    rerender_chat();
+}
+
+static int try_reconnect(void) {
+    if (sock_fd >= 0) return 1;
+    time_t now = time(NULL);
+    if (now < next_reconnect_at) return 0;
+
+    int fd = connect_server(0);
+    if (fd >= 0) {
+        sock_fd = fd;
+        set_nonblock(sock_fd);
+        recv_len = 0;
+        suppress_replay_duplicates = log_count > 0;
+        next_reconnect_at = 0;
+        return 1;
+    }
+
+    next_reconnect_at = now + 1;
+    return 0;
 }
 
 /* ---------- management commands ---------- */
@@ -949,28 +1073,129 @@ static int require_root(const char *command) {
     return 0;
 }
 
-static int run_update(void) {
+static void trim_line(char *s) {
+    size_t len = strlen(s);
+    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' ||
+                       s[len - 1] == ' ' || s[len - 1] == '\t')) {
+        s[--len] = '\0';
+    }
+}
+
+static int fetch_remote_version(char *out, size_t cap) {
+    const char *cmd =
+        "curl -fsSL " REMOTE_CLIENT_URL " 2>/dev/null | "
+        "sed -n 's/^#define VERSION[[:space:]]*\"\\([^\"]*\\)\"/\\1/p' | "
+        "head -n 1";
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return -1;
+    if (!fgets(out, (int)cap, fp)) out[0] = '\0';
+    int rc = command_status(pclose(fp));
+    trim_line(out);
+    if (rc != 0 || out[0] == '\0') return -1;
+    return 0;
+}
+
+static int print_update_check(const char *remote) {
+    printf("installed: %s\n", VERSION);
+    printf("latest:    %s\n", remote);
+    if (strcmp(VERSION, remote) == 0) {
+        printf("status:    up to date\n");
+        return 0;
+    }
+    printf("status:    update available\n");
+    return 1;
+}
+
+static int run_update(int check_only) {
+    char remote[64];
+    int have_remote = fetch_remote_version(remote, sizeof(remote)) == 0;
+
+    if (check_only) {
+        if (!have_remote) {
+            fprintf(stderr, "could not check latest localchat version\n");
+            return 1;
+        }
+        return print_update_check(remote);
+    }
+
+    if (have_remote) {
+        int needs_update = print_update_check(remote);
+        if (!needs_update) return 0;
+    } else {
+        fprintf(stderr, "warning: could not check latest localchat version; updating anyway\n");
+    }
+
+#if !HAVE_SYSTEMD_COMMANDS
+    fprintf(stderr, "localchat update installs the Linux systemd service and is not supported on this platform.\n");
+    fprintf(stderr, "update from a checkout instead: git pull && make && sudo make install\n");
+    return 2;
+#endif
+
     if (!require_root("update")) return 1;
     printf("updating localchat from %s\n", INSTALL_URL);
     return run_shell_command("curl -fsSL " INSTALL_URL " | bash");
 }
 
 static int run_service_command(const char *action, int needs_root) {
+#if !HAVE_SYSTEMD_COMMANDS
+    (void)needs_root;
+    fprintf(stderr, "localchat %s uses systemd and is only available on Linux.\n", action);
+    fprintf(stderr, "on this platform, run the daemon manually:\n");
+    fprintf(stderr, "  localchatd --socket %s\n", socket_path);
+    return 2;
+#else
     char cmd[128];
     if (needs_root && !require_root(action)) return 1;
     snprintf(cmd, sizeof(cmd), "systemctl %s localchatd", action);
     return run_shell_command(cmd);
+#endif
+}
+
+static int run_status(void) {
+#if HAVE_SYSTEMD_COMMANDS
+    return run_service_command("status", 0);
+#else
+    struct stat st;
+    printf("localchat %s\n", VERSION);
+    printf("service:   manual (systemd is Linux-only)\n");
+    printf("socket:    %s\n", socket_path);
+
+    if (stat(socket_path, &st) != 0) {
+        printf("daemon:    not reachable\n");
+        printf("start:     localchatd --socket %s\n", socket_path);
+        return 3;
+    }
+
+    int fd = connect_unix(socket_path);
+    if (fd >= 0) {
+        close(fd);
+        printf("daemon:    reachable\n");
+        return 0;
+    }
+
+    printf("daemon:    socket exists, connect failed: %s\n", strerror(errno));
+    printf("start:     localchatd --socket %s\n", socket_path);
+    return 1;
+#endif
 }
 
 static int run_logs(int follow) {
+#if !HAVE_SYSTEMD_COMMANDS
+    (void)follow;
+    fprintf(stderr, "localchat logs reads journald and is only available on Linux.\n");
+    fprintf(stderr, "on this platform, localchatd logs to the terminal where it is running.\n");
+    return 2;
+#else
     if (follow) {
         return run_shell_command("journalctl -u localchatd -f");
     }
     return run_shell_command("journalctl -u localchatd --no-pager -n 80");
+#endif
 }
 
 static int run_uninstall(void) {
     if (!require_root("uninstall")) return 1;
+#if HAVE_SYSTEMD_COMMANDS
     int rc;
     rc = system("systemctl stop localchatd 2>/dev/null"); (void)rc;
     rc = system("systemctl disable localchatd 2>/dev/null"); (void)rc;
@@ -981,6 +1206,11 @@ static int run_uninstall(void) {
     unlink(LEGACY_SOCKET_PATH);
     rmdir("/run/localchat");
     rc = system("systemctl daemon-reload 2>/dev/null"); (void)rc;
+#else
+    unlink("/usr/local/sbin/localchatd");
+    unlink("/usr/local/bin/localchat");
+    unlink(DEFAULT_SOCKET_PATH);
+#endif
     printf("localchat has been uninstalled.\n");
     return 0;
 }
@@ -995,22 +1225,40 @@ static int is_command(const char *arg) {
            strcmp(arg, "uninstall") == 0;
 }
 
+static int parse_color_mode(const char *value) {
+    if (strcmp(value, "auto") == 0) {
+        color_mode = COLOR_AUTO;
+        return 0;
+    }
+    if (strcmp(value, "always") == 0) {
+        color_mode = COLOR_ALWAYS;
+        return 0;
+    }
+    if (strcmp(value, "never") == 0) {
+        color_mode = COLOR_NEVER;
+        return 0;
+    }
+    return -1;
+}
+
 static void usage(FILE *out) {
     fprintf(out,
         "localchat %s\n"
         "Usage: localchat [OPTIONS] [COMMAND]\n"
         "\n"
         "Commands:\n"
-        "  update               Download and run the installer (requires root).\n"
-        "  status               Show localchatd service status.\n"
-        "  start                Start localchatd (requires root).\n"
-        "  stop                 Stop localchatd (requires root).\n"
-        "  restart              Restart localchatd (requires root).\n"
-        "  logs [-f]            Show recent daemon logs, or follow them.\n"
+        "  update               Download and run the Linux installer (requires root).\n"
+        "  status               Show localchatd status.\n"
+        "  start                Start localchatd via systemd (Linux, requires root).\n"
+        "  stop                 Stop localchatd via systemd (Linux, requires root).\n"
+        "  restart              Restart localchatd via systemd (Linux, requires root).\n"
+        "  logs [-f]            Show recent systemd logs, or follow them (Linux).\n"
         "  uninstall            Remove localchat (requires root).\n"
         "\n"
         "Options:\n"
         "  -s, --socket PATH    Socket path (default: %s).\n"
+        "      --color MODE     Color mode: auto, always, never.\n"
+        "      --no-color       Disable colors.\n"
         "  -h, --help           Show this help and exit.\n"
         "      --version        Show version and exit.\n"
         "\n"
@@ -1020,13 +1268,19 @@ static void usage(FILE *out) {
         "  Backspace/Del edit              Ctrl-W    delete word back\n"
         "  Ctrl-U/Ctrl-K clear / kill EOL  Ctrl-L    redraw\n"
         "  ↑/↓           scroll linewise   PgUp/PgDn scroll pagewise\n"
-        "  Ctrl-C/D      quit\n",
-        VERSION, DEFAULT_SOCKET_PATH);
+        "  Ctrl-C/D      quit\n"
+        "\n"
+        "Manual daemon:\n"
+        "  localchatd --socket %s\n",
+        VERSION, DEFAULT_SOCKET_PATH, DEFAULT_SOCKET_PATH);
 }
 
 int main(int argc, char **argv) {
     const char *command = NULL;
     int logs_follow = 0;
+    int update_check = 0;
+
+    if (getenv("NO_COLOR")) color_mode = COLOR_NEVER;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1034,6 +1288,10 @@ int main(int argc, char **argv) {
             if (strcmp(command, "logs") == 0 &&
                 (strcmp(a, "-f") == 0 || strcmp(a, "--follow") == 0)) {
                 logs_follow = 1;
+                continue;
+            }
+            if (strcmp(command, "update") == 0 && strcmp(a, "--check") == 0) {
+                update_check = 1;
                 continue;
             }
             fprintf(stderr, "unexpected argument: %s\n", a);
@@ -1050,6 +1308,21 @@ int main(int argc, char **argv) {
                 return 2;
             }
             socket_path = argv[++i];
+        } else if (strcmp(a, "--no-color") == 0) {
+            color_mode = COLOR_NEVER;
+        } else if (strncmp(a, "--color=", 8) == 0) {
+            if (parse_color_mode(a + 8) != 0) {
+                fprintf(stderr, "invalid color mode: %s\n", a + 8);
+                usage(stderr);
+                return 2;
+            }
+        } else if (strcmp(a, "--color") == 0) {
+            if (i + 1 >= argc || parse_color_mode(argv[i + 1]) != 0) {
+                fprintf(stderr, "invalid or missing argument for --color\n");
+                usage(stderr);
+                return 2;
+            }
+            i++;
         } else if (is_command(a)) {
             command = a;
         } else {
@@ -1060,8 +1333,8 @@ int main(int argc, char **argv) {
     }
 
     if (command) {
-        if (strcmp(command, "update") == 0) return run_update();
-        if (strcmp(command, "status") == 0) return run_service_command("status", 0);
+        if (strcmp(command, "update") == 0) return run_update(update_check);
+        if (strcmp(command, "status") == 0) return run_status();
         if (strcmp(command, "start") == 0) return run_service_command("start", 1);
         if (strcmp(command, "stop") == 0) return run_service_command("stop", 1);
         if (strcmp(command, "restart") == 0) return run_service_command("restart", 1);
@@ -1072,7 +1345,7 @@ int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
     load_local_username();
 
-    sock_fd = connect_server();
+    sock_fd = connect_server(1);
     if (sock_fd < 0) return 1;
     set_nonblock(sock_fd);
 
@@ -1089,11 +1362,12 @@ int main(int argc, char **argv) {
     init_color_pairs();
 
     getmaxyx(stdscr, term_h, term_w);
-    chat_h = term_h - 3;
+    chat_h = term_h - 4;
     if (chat_h < 1) chat_h = 1;
-    chat_win  = newwin(chat_h, term_w, 0, 0);
-    input_win = newwin(3, term_w, chat_h, 0);
-    if (!chat_win || !input_win) {
+    status_win = newwin(1, term_w, 0, 0);
+    chat_win  = newwin(chat_h, term_w, 1, 0);
+    input_win = newwin(3, term_w, chat_h + 1, 0);
+    if (!status_win || !chat_win || !input_win) {
         endwin();
         close(sock_fd);
         fprintf(stderr, "failed to create ncurses windows\n");
@@ -1116,7 +1390,6 @@ int main(int argc, char **argv) {
     render_system("[system] connected to localchat");
     redraw_all();
 
-    int disconnected = 0;
     while (!exit_requested) {
         if (resize_pending) {
             resize_pending = 0;
@@ -1124,40 +1397,49 @@ int main(int argc, char **argv) {
         }
 
         struct pollfd pfds[2];
-        pfds[0].fd = STDIN_FILENO; pfds[0].events = POLLIN;
-        pfds[1].fd = sock_fd;      pfds[1].events = POLLIN;
+        nfds_t nfds = 0;
+        int stdin_slot = -1;
+        int sock_slot = -1;
 
-        int r = poll(pfds, 2, -1);
+        stdin_slot = (int)nfds;
+        pfds[nfds].fd = STDIN_FILENO;
+        pfds[nfds].events = POLLIN;
+        nfds++;
+
+        if (sock_fd >= 0) {
+            sock_slot = (int)nfds;
+            pfds[nfds].fd = sock_fd;
+            pfds[nfds].events = POLLIN;
+            nfds++;
+        }
+
+        int r = poll(pfds, nfds, sock_fd >= 0 ? -1 : 1000);
         if (r < 0) {
             if (errno == EINTR) continue;
             break;
         }
 
-        if (pfds[0].revents & POLLIN) process_keys();
-
-        if (pfds[1].revents & (POLLIN | POLLHUP)) {
-            if (handle_socket_in() != 0) { disconnected = 1; break; }
-        }
-        if (pfds[1].revents & (POLLERR | POLLNVAL)) {
-            disconnected = 1;
-            break;
+        if (r == 0) {
+            try_reconnect();
+            redraw_all();
+            continue;
         }
 
-        redraw_all();
-    }
+        if (stdin_slot >= 0 && (pfds[stdin_slot].revents & POLLIN)) process_keys();
 
-    if (disconnected) {
-        scroll_offset = 0;
-        render_system("[system] disconnected from server");
+        if (sock_slot >= 0 && (pfds[sock_slot].revents & (POLLIN | POLLHUP))) {
+            if (handle_socket_in() != 0) mark_disconnected();
+        }
+        if (sock_slot >= 0 && sock_fd >= 0 && (pfds[sock_slot].revents & (POLLERR | POLLNVAL))) {
+            mark_disconnected();
+        }
+
+        if (sock_fd < 0) try_reconnect();
         redraw_all();
-        nodelay(input_win, FALSE);
-        wtimeout(input_win, 1500);
-        wint_t dummy;
-        wget_wch(input_win, &dummy);
     }
 
     endwin();
-    if (sock_fd >= 0) close(sock_fd);
+    close_server_connection();
     for (int i = 0; i < LOG_CAP; i++) free(log_lines[i]);
     return 0;
 }

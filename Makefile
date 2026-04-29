@@ -33,6 +33,10 @@ check:
 	$(CC) -fsyntax-only $(CFLAGS) $(CLIENT_SRC)
 	bash -n install.sh
 
+test:
+	$(MAKE) all
+	tests/smoke.sh
+
 install: all
 	install -d -m 755 "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(SBINDIR)"
 	install -m 755 $(SERVER_BIN) "$(DESTDIR)$(SBINDIR)/$(SERVER_BIN)"
@@ -44,4 +48,4 @@ uninstall:
 clean:
 	rm -f $(SERVER_BIN) $(CLIENT_BIN)
 
-.PHONY: all check install uninstall clean
+.PHONY: all check test install uninstall clean

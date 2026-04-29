@@ -174,10 +174,12 @@ button:focus-visible {
 
 button.copied {
   color: var(--amber);
+  animation: copy-pulse 0.9s steps(2, end);
 }
 
 button.failed {
   color: var(--red);
+  animation: copy-shake 0.18s linear 2;
 }
 
 svg {
@@ -187,6 +189,35 @@ svg {
   stroke: currentColor;
   stroke-width: 1.8;
   stroke-linejoin: round;
+}
+
+@keyframes copy-pulse {
+  0%,
+  100% {
+    background: transparent;
+    box-shadow: none;
+  }
+
+  35%,
+  70% {
+    background: rgba(212, 168, 79, 0.16);
+    box-shadow: 0 0 18px rgba(212, 168, 79, 0.26) inset;
+  }
+}
+
+@keyframes copy-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+
+  40% {
+    transform: translateX(-1px);
+  }
+
+  70% {
+    transform: translateX(1px);
+  }
 }
 
 a {
