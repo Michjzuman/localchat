@@ -213,7 +213,15 @@ static int mb_columns(const char *s) {
     return cols;
 }
 
+static const char *display_system_text(const char *text) {
+    if (strncmp(text, "[system]", 8) != 0) return text;
+    text += 8;
+    if (*text == ' ') text++;
+    return text;
+}
+
 static void render_system(const char *text) {
+    text = display_system_text(text);
     int h, w; getmaxyx(chat_win, h, w); (void)h;
     int cols = mb_columns(text);
     int pad  = (w - cols) / 2;
