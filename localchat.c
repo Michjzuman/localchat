@@ -58,6 +58,7 @@ static int            sock_fd = -1;
 static WINDOW        *status_win = NULL;
 static WINDOW        *chat_win  = NULL;
 static WINDOW        *input_win = NULL;
+static WINDOW        *chat_draw_win = NULL;
 static char           local_username[USERNAME_MAX];
 static const char    *socket_path = DEFAULT_SOCKET_PATH;
 
@@ -267,17 +268,22 @@ static const char *display_system_text(const char *text) {
     return text;
 }
 
+static WINDOW *chat_target(void) {
+    return chat_draw_win ? chat_draw_win : chat_win;
+}
+
 static void render_system(const char *text) {
     text = display_system_text(text);
     int h, w; getmaxyx(chat_win, h, w); (void)h;
+    WINDOW *win = chat_target();
     int cols = mb_columns(text);
     int pad  = (w - cols) / 2;
     if (pad < 0) pad = 0;
-    style_on(chat_win, CP_SYSTEM, A_DIM);
-    put_spaces(chat_win, pad);
-    waddstr(chat_win, text);
-    waddch(chat_win, '\n');
-    style_off(chat_win, CP_SYSTEM, A_DIM);
+    style_on(win, CP_SYSTEM, A_DIM);
+    put_spaces(win, pad);
+    waddstr(win, text);
+    waddch(win, '\n');
+    style_off(win, CP_SYSTEM, A_DIM);
 }
 
 static int next_message_chunk(const char **cursor, int max_cols,
@@ -354,58 +360,60 @@ static int wrapped_message_columns(const char *message, int max_cols) {
 
 static void render_bubble_line(const char *body, int body_cols, int line_cols,
                                int own, int left_pad, int show_tail) {
+    WINDOW *win = chat_target();
     int fill = body_cols - line_cols;
     if (fill < 0) fill = 0;
 
     if (own) {
-        put_spaces(chat_win, left_pad);
-        style_on(chat_win, border_pair(own), A_DIM);
-        waddstr(chat_win, "│ ");
-        style_off(chat_win, border_pair(own), A_DIM);
+        put_spaces(win, left_pad);
+        style_on(win, border_pair(own), A_DIM);
+        waddstr(win, "│ ");
+        style_off(win, border_pair(own), A_DIM);
 
-        style_on(chat_win, message_pair(own), 0);
-        waddstr(chat_win, body);
-        put_spaces(chat_win, fill);
-        style_off(chat_win, message_pair(own), 0);
+        style_on(win, message_pair(own), 0);
+        waddstr(win, body);
+        put_spaces(win, fill);
+        style_off(win, message_pair(own), 0);
 
-        style_on(chat_win, border_pair(own), A_DIM);
-        waddstr(chat_win, " │");
-        style_off(chat_win, border_pair(own), A_DIM);
+        style_on(win, border_pair(own), A_DIM);
+        waddstr(win, " │");
+        style_off(win, border_pair(own), A_DIM);
         if (show_tail) {
-            style_on(chat_win, message_pair(own), A_BOLD);
-            waddstr(chat_win, "❯");
-            style_off(chat_win, message_pair(own), A_BOLD);
-            waddch(chat_win, '\n');
+            style_on(win, message_pair(own), A_BOLD);
+            waddstr(win, "❯");
+            style_off(win, message_pair(own), A_BOLD);
+            waddch(win, '\n');
         } else {
-            waddstr(chat_win, " \n");
+            waddstr(win, " \n");
         }
     } else {
         if (show_tail) {
-            style_on(chat_win, message_pair(own), A_BOLD);
-            waddstr(chat_win, "❮");
-            style_off(chat_win, message_pair(own), A_BOLD);
+            style_on(win, message_pair(own), A_BOLD);
+            waddstr(win, "❮");
+            style_off(win, message_pair(own), A_BOLD);
         } else {
-            waddstr(chat_win, " ");
+            waddstr(win, " ");
         }
-        style_on(chat_win, border_pair(own), A_DIM);
-        waddstr(chat_win, "│ ");
-        style_off(chat_win, border_pair(own), A_DIM);
+        style_on(win, border_pair(own), A_DIM);
+        waddstr(win, "│ ");
+        style_off(win, border_pair(own), A_DIM);
 
-        style_on(chat_win, message_pair(own), 0);
-        waddstr(chat_win, body);
-        put_spaces(chat_win, fill);
-        style_off(chat_win, message_pair(own), 0);
+        style_on(win, message_pair(own), 0);
+        waddstr(win, body);
+        put_spaces(win, fill);
+        style_off(win, message_pair(own), 0);
 
-        style_on(chat_win, border_pair(own), A_DIM);
-        waddstr(chat_win, " │");
-        style_off(chat_win, border_pair(own), A_DIM);
-        waddch(chat_win, '\n');
+        style_on(win, border_pair(own), A_DIM);
+        waddstr(win, " │");
+        style_off(win, border_pair(own), A_DIM);
+        waddch(win, '\n');
     }
 }
 
 static void render_bubble(const char *name, const char *message, int own,
                           int show_name, int show_tail) {
     int h, w; getmaxyx(chat_win, h, w); (void)h;
+    WINDOW *win = chat_target();
     int name_cols = mb_columns(name);
     int max_cols  = max_message_columns();
     if (max_cols < 1) max_cols = 1;
@@ -423,32 +431,32 @@ static void render_bubble(const char *name, const char *message, int own,
         if (show_name) {
             int name_pad = right_edge - (name_cols + 3);
             if (name_pad < 0) name_pad = 0;
-            put_spaces(chat_win, name_pad);
-            style_on(chat_win, message_pair(own), A_BOLD);
-            wprintw(chat_win, "%s   \n", name);
-            style_off(chat_win, message_pair(own), A_BOLD);
+            put_spaces(win, name_pad);
+            style_on(win, message_pair(own), A_BOLD);
+            wprintw(win, "%s   \n", name);
+            style_off(win, message_pair(own), A_BOLD);
         }
 
         left_pad = right_edge - bubble_cols;
         if (left_pad < 0) left_pad = 0;
 
-        put_spaces(chat_win, left_pad);
-        style_on(chat_win, border_pair(own), A_DIM);
-        waddstr(chat_win, "╭─");
-        put_repeat(chat_win, "─", body_cols);
-        waddstr(chat_win, "─╮ \n");
-        style_off(chat_win, border_pair(own), A_DIM);
+        put_spaces(win, left_pad);
+        style_on(win, border_pair(own), A_DIM);
+        waddstr(win, "╭─");
+        put_repeat(win, "─", body_cols);
+        waddstr(win, "─╮ \n");
+        style_off(win, border_pair(own), A_DIM);
     } else {
         if (show_name) {
-            style_on(chat_win, message_pair(own), A_BOLD);
-            wprintw(chat_win, "  %s\n", name);
-            style_off(chat_win, message_pair(own), A_BOLD);
+            style_on(win, message_pair(own), A_BOLD);
+            wprintw(win, "  %s\n", name);
+            style_off(win, message_pair(own), A_BOLD);
         }
-        style_on(chat_win, border_pair(own), A_DIM);
-        waddstr(chat_win, " ╭─");
-        put_repeat(chat_win, "─", body_cols);
-        waddstr(chat_win, "─╮\n");
-        style_off(chat_win, border_pair(own), A_DIM);
+        style_on(win, border_pair(own), A_DIM);
+        waddstr(win, " ╭─");
+        put_repeat(win, "─", body_cols);
+        waddstr(win, "─╮\n");
+        style_off(win, border_pair(own), A_DIM);
     }
 
     if (message[0] == '\0') {
@@ -472,18 +480,18 @@ static void render_bubble(const char *name, const char *message, int own,
     }
 
     if (own) {
-        put_spaces(chat_win, left_pad);
-        style_on(chat_win, border_pair(own), A_DIM);
-        waddstr(chat_win, "╰─");
-        put_repeat(chat_win, "─", body_cols);
-        waddstr(chat_win, "─╯ \n");
-        style_off(chat_win, border_pair(own), A_DIM);
+        put_spaces(win, left_pad);
+        style_on(win, border_pair(own), A_DIM);
+        waddstr(win, "╰─");
+        put_repeat(win, "─", body_cols);
+        waddstr(win, "─╯ \n");
+        style_off(win, border_pair(own), A_DIM);
     } else {
-        style_on(chat_win, border_pair(own), A_DIM);
-        waddstr(chat_win, " ╰─");
-        put_repeat(chat_win, "─", body_cols);
-        waddstr(chat_win, "─╯\n");
-        style_off(chat_win, border_pair(own), A_DIM);
+        style_on(win, border_pair(own), A_DIM);
+        waddstr(win, " ╰─");
+        put_repeat(win, "─", body_cols);
+        waddstr(win, "─╯\n");
+        style_off(win, border_pair(own), A_DIM);
     }
 }
 
@@ -600,11 +608,13 @@ static int total_rendered_rows(void) {
 }
 
 static int max_scroll_offset(void) {
-    int oldest = oldest_log_index();
-    int entries = log_count - oldest;
-    if (entries <= 1) return 0;
-    if (total_rendered_rows() <= chat_h) return 0;
-    return entries - 1;
+    int rows = total_rendered_rows();
+    if (rows <= chat_h) return 0;
+
+    int reserved_rows = chat_h > 1 ? 1 : 0;
+    int visible_rows = chat_h - reserved_rows;
+    if (visible_rows < 1) visible_rows = 1;
+    return rows - visible_rows;
 }
 
 static void clamp_scroll_offset(void) {
@@ -617,33 +627,30 @@ static void rerender_chat(void) {
     werase(chat_win);
     clamp_scroll_offset();
 
-    int reserved_rows = scroll_offset > 0 ? 1 : 0;
+    int total_rows = total_rendered_rows();
+    if (total_rows <= 0) return;
+
+    int reserved_rows = scroll_offset > 0 && chat_h > 1 ? 1 : 0;
     int visible_rows = chat_h - reserved_rows;
     if (visible_rows < 1) visible_rows = 1;
 
-    int last = log_count - scroll_offset;
-    if (last > log_count) last = log_count;
-    if (last < 0) last = 0;
+    int start_row = total_rows - visible_rows - scroll_offset;
+    if (start_row < 0) start_row = 0;
+    if (start_row > total_rows - 1) start_row = total_rows - 1;
+
+    int pad_rows = total_rows + 1;
+    if (pad_rows < start_row + visible_rows + 1) {
+        pad_rows = start_row + visible_rows + 1;
+    }
+    int pad_cols = term_w > 0 ? term_w : 1;
+    WINDOW *pad = newpad(pad_rows, pad_cols);
+    if (!pad) return;
+    scrollok(pad, FALSE);
+    werase(pad);
+
+    chat_draw_win = pad;
     int oldest = oldest_log_index();
-    if (last < oldest) last = oldest;
-
-    int first = last;
-    int rows = 0;
-    while (first > oldest && rows < visible_rows) {
-        first--;
-        rows += rendered_log_rows(first);
-    }
-
-    if (scroll_offset > 0) {
-        if (colors_enabled) style_on(chat_win, CP_SCROLL, A_BOLD);
-        else wattron(chat_win, A_REVERSE);
-        mvwprintw(chat_win, 0, 0, " -- scrollback (%d) -- ", scroll_offset);
-        if (colors_enabled) style_off(chat_win, CP_SCROLL, A_BOLD);
-        else wattroff(chat_win, A_REVERSE);
-        wmove(chat_win, 1, 0);
-    }
-
-    for (int i = first; i < last; i++) {
+    for (int i = oldest; i < log_count; i++) {
         const char *raw = log_lines[i % LOG_CAP];
         if (!raw) continue;
         char tmp[MAX_MSG_LEN + 32];
@@ -678,6 +685,24 @@ static void rerender_chat(void) {
 
         render_bubble(cur.name, cur.msg, cur.own, show_name, show_tail);
     }
+    chat_draw_win = NULL;
+
+    if (scroll_offset > 0) {
+        if (colors_enabled) style_on(chat_win, CP_SCROLL, A_BOLD);
+        else wattron(chat_win, A_REVERSE);
+        mvwprintw(chat_win, 0, 0, " -- scrollback (%d rows) -- ", scroll_offset);
+        if (colors_enabled) style_off(chat_win, CP_SCROLL, A_BOLD);
+        else wattroff(chat_win, A_REVERSE);
+    }
+
+    int dest_top = reserved_rows;
+    int dest_bottom = dest_top + visible_rows - 1;
+    if (dest_bottom >= chat_h) dest_bottom = chat_h - 1;
+    if (dest_top <= dest_bottom && term_w > 0) {
+        copywin(pad, chat_win, start_row, 0, dest_top, 0,
+                dest_bottom, term_w - 1, 0);
+    }
+    delwin(pad);
 }
 
 static void render_input(void) {
@@ -794,8 +819,7 @@ static void send_input(void) {
         if (send_text(mb, (size_t)n) != 0) {
             log_add("[system] failed to send message");
             scroll_offset = 0;
-            char tmp[64]; snprintf(tmp, sizeof(tmp), "[system] failed to send message");
-            render_system(tmp);
+            rerender_chat();
         }
     }
     input_len = 0;
@@ -958,7 +982,7 @@ static void handle_resize(void) {
     status_win = newwin(1, term_w, 0, 0);
     chat_win  = newwin(chat_h, term_w, 1, 0);
     input_win = newwin(3, term_w, chat_h + 1, 0);
-    if (chat_win)  scrollok(chat_win, TRUE);
+    if (chat_win)  scrollok(chat_win, FALSE);
     if (input_win) { keypad(input_win, TRUE); nodelay(input_win, TRUE); }
     rerender_chat();
     redraw_all();
@@ -1373,7 +1397,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to create ncurses windows\n");
         return 1;
     }
-    scrollok(chat_win, TRUE);
+    scrollok(chat_win, FALSE);
     keypad(input_win, TRUE);
     nodelay(input_win, TRUE);
 
