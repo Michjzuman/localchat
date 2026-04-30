@@ -1603,7 +1603,8 @@ static void build_ai_prompt(char *out, size_t cap,
         "Du bist ein optionaler lokaler Chat-Teilnehmer namens ai-slop.\n"
         "Antworte nur, wenn eine Antwort im Kontext des Chats sinnvoll, hilfreich oder lustig ist.\n"
         "Wenn keine Antwort sinnvoll ist, antworte exakt mit NO_RESPONSE und sonst nichts.\n"
-        "Wenn du antwortest, halte dich kurz und schreibe direkt die Chatnachricht ohne Prefix.\n\n"
+        "Wenn du antwortest, halte dich kurz und schreibe direkt die Chatnachricht ohne Prefix.\n"
+        "Gib niemals internes Denken, Reasoning oder <think>-Bloecke aus.\n\n"
         "Chatverlauf:\n");
 
     for (int i = 0; i < history_count; i++) {
@@ -1626,7 +1627,8 @@ static int run_ollama_prompt(const char *model, const char *prompt, char *out, s
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[1]);
-        execlp("ollama", "ollama", "run", model, prompt, (char *)NULL);
+        execlp("ollama", "ollama", "run", "--think=low", "--hidethinking",
+               model, prompt, (char *)NULL);
         _exit(127);
     }
 
@@ -1652,11 +1654,32 @@ static int run_ollama_prompt(const char *model, const char *prompt, char *out, s
     return 0;
 }
 
+static void remove_ai_thinking_blocks(char *response) {
+    char *start;
+    while ((start = strstr(response, "<think>")) != NULL) {
+        char *end = strstr(start + 7, "</think>");
+        if (!end) {
+            *start = '\0';
+            break;
+        }
+        end += 8;
+        memmove(start, end, strlen(end) + 1);
+    }
+}
+
+static void sanitize_ai_response(char *response) {
+    remove_ai_thinking_blocks(response);
+    trim_whitespace(response);
+}
+
 static int is_no_ai_response(const char *response) {
-    return response[0] == '\0' ||
-           strcmp(response, "NO_RESPONSE") == 0 ||
-           strcmp(response, "\"NO_RESPONSE\"") == 0 ||
-           strcmp(response, "'NO_RESPONSE'") == 0;
+    while (*response == '"' || *response == '\'' || *response == '`') response++;
+    if (*response == '\0') return 1;
+    if (strncmp(response, "NO_RESPONSE", 11) != 0) return 0;
+
+    char next = response[11];
+    return next == '\0' || isspace((unsigned char)next) ||
+           next == '"' || next == '\'' || next == '`' || next == '.';
 }
 
 static int send_ai_response(const char *response) {
@@ -1711,12 +1734,11 @@ static int run_ai_slop(void) {
         char prompt[32768];
         char response[AI_RESPONSE_LIMIT + 1];
         build_ai_prompt(prompt, sizeof(prompt), history, history_count);
-        printf("ai-slop thinking about %s...\n", parsed.name);
-        fflush(stdout);
         if (run_ollama_prompt(model, prompt, response, sizeof(response)) != 0) {
             fprintf(stderr, "ollama generation failed\n");
             continue;
         }
+        sanitize_ai_response(response);
         if (is_no_ai_response(response)) continue;
 
         if (send_ai_response(response) != 0) {
