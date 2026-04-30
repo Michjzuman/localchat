@@ -97,6 +97,10 @@ typing_off = recv_frame(second)
 assert typing_off.startswith("[typing] "), typing_off
 assert typing_off.endswith(" 0"), typing_off
 
+send_frame(first, "[localchat:ai] synthetic response")
+ai_msg = recv_frame(second)
+assert ai_msg == "[ai-slop] synthetic response", ai_msg
+
 first.close()
 second.close()
 PY

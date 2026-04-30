@@ -53,6 +53,8 @@
 #define HISTORY_CAP         128
 #define HISTORY_REPLAY_CAP  (OUT_BUF_CAP - 4096)
 #define TYPING_CONTROL      "[localchat:typing]"
+#define AI_CONTROL          "[localchat:ai]"
+#define AI_USERNAME         "ai-slop"
 
 typedef struct {
     int            fd;
@@ -323,6 +325,18 @@ static int process_in_buffer(int idx) {
                 c->typing = active;
                 broadcast_typing_name(c->username, active, idx);
             }
+            continue;
+        }
+
+        if (strncmp(body + bstart, AI_CONTROL, strlen(AI_CONTROL)) == 0) {
+            const char *response = body + bstart + strlen(AI_CONTROL);
+            while (*response == ' ' || *response == '\t') response++;
+            if (*response == '\0') continue;
+
+            char out[sizeof(AI_USERNAME) + MAX_BODY_LEN + 8];
+            snprintf(out, sizeof(out), "[%s] %s", AI_USERNAME, response);
+            history_add_chat(out);
+            broadcast_text(out, -1);
             continue;
         }
 

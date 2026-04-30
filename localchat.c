@@ -11,6 +11,7 @@
 #define _XOPEN_SOURCE_EXTENDED 1
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -55,6 +56,10 @@
 #define BUBBLE_WRAP_COLS    64
 #define TYPING_CONTROL      "[localchat:typing]"
 #define TYPING_EVENT_PREFIX "[typing] "
+#define AI_CONTROL          "[localchat:ai]"
+#define AI_USERNAME         "ai-slop"
+#define AI_CONTEXT_MESSAGES 24
+#define AI_RESPONSE_LIMIT   3000
 #define TYPING_IDLE_SECS    3
 #define TYPING_TTL_SECS     4
 #define TYPING_REFRESH_SECS 1
@@ -1461,6 +1466,267 @@ static void trim_line(char *s) {
     }
 }
 
+static void trim_whitespace(char *s) {
+    trim_line(s);
+    size_t start = 0;
+    while (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
+        start++;
+    }
+    if (start > 0) memmove(s, s + start, strlen(s + start) + 1);
+}
+
+static int read_exact_blocking(int fd, void *buf, size_t n) {
+    unsigned char *p = buf;
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = read(fd, p + got, n - got);
+        if (r > 0) {
+            got += (size_t)r;
+            continue;
+        }
+        if (r == 0) return -1;
+        if (errno == EINTR) continue;
+        return -1;
+    }
+    return 0;
+}
+
+static int recv_frame_blocking(int fd, char *out, size_t cap) {
+    uint32_t netlen;
+    if (read_exact_blocking(fd, &netlen, sizeof(netlen)) != 0) return -1;
+    uint32_t len = ntohl(netlen);
+    if (len > MAX_MSG_LEN) return -1;
+
+    char buf[MAX_MSG_LEN + 1];
+    if (read_exact_blocking(fd, buf, len) != 0) return -1;
+    buf[len] = '\0';
+
+    if (cap > 0) {
+        snprintf(out, cap, "%s", buf);
+    }
+    return 0;
+}
+
+static int load_ollama_models(char models[][128], int max_models) {
+    FILE *fp = popen("ollama list 2>/dev/null", "r");
+    if (!fp) return -1;
+
+    char line[512];
+    int count = 0;
+    int first = 1;
+    while (fgets(line, sizeof(line), fp)) {
+        trim_line(line);
+        if (line[0] == '\0') continue;
+        if (first) {
+            first = 0;
+            if (strncmp(line, "NAME", 4) == 0) continue;
+        }
+        char name[128];
+        if (sscanf(line, "%127s", name) == 1 && count < max_models) {
+            snprintf(models[count++], 128, "%s", name);
+        }
+    }
+    int rc = command_status(pclose(fp));
+    if (rc != 0) return -1;
+    return count;
+}
+
+static int choose_ollama_model(char *model, size_t cap) {
+    char models[64][128];
+    int count = load_ollama_models(models, 64);
+    if (count < 0) {
+        fprintf(stderr, "could not run `ollama list`; is Ollama installed and running?\n");
+        return 1;
+    }
+
+    printf("ai-slop setup\n");
+    if (count == 0) {
+        printf("no local Ollama models found. enter a model name manually: ");
+    } else {
+        printf("available Ollama models:\n");
+        for (int i = 0; i < count; i++) {
+            printf("  %2d  %s\n", i + 1, models[i]);
+        }
+        printf("model [1]: ");
+    }
+    fflush(stdout);
+
+    char answer[256];
+    if (!fgets(answer, sizeof(answer), stdin)) return 1;
+    trim_whitespace(answer);
+
+    if (answer[0] == '\0' && count > 0) {
+        snprintf(model, cap, "%s", models[0]);
+        return 0;
+    }
+
+    int numeric = answer[0] != '\0';
+    for (size_t i = 0; answer[i]; i++) {
+        if (!isdigit((unsigned char)answer[i])) {
+            numeric = 0;
+            break;
+        }
+    }
+    if (numeric && count > 0) {
+        int choice = atoi(answer);
+        if (choice < 1 || choice > count) {
+            fprintf(stderr, "invalid model selection\n");
+            return 1;
+        }
+        snprintf(model, cap, "%s", models[choice - 1]);
+        return 0;
+    }
+
+    if (answer[0] == '\0') {
+        fprintf(stderr, "no model selected\n");
+        return 1;
+    }
+    snprintf(model, cap, "%s", answer);
+    return 0;
+}
+
+static void ai_history_add(char history[AI_CONTEXT_MESSAGES][MAX_MSG_LEN + 1],
+                           int *count, const char *line) {
+    if (*count < AI_CONTEXT_MESSAGES) {
+        snprintf(history[*count], MAX_MSG_LEN + 1, "%s", line);
+        (*count)++;
+        return;
+    }
+    memmove(history[0], history[1], (AI_CONTEXT_MESSAGES - 1) * (MAX_MSG_LEN + 1));
+    snprintf(history[AI_CONTEXT_MESSAGES - 1], MAX_MSG_LEN + 1, "%s", line);
+}
+
+static void build_ai_prompt(char *out, size_t cap,
+                            char history[AI_CONTEXT_MESSAGES][MAX_MSG_LEN + 1],
+                            int history_count) {
+    snprintf(out, cap,
+        "Du bist ein optionaler lokaler Chat-Teilnehmer namens ai-slop.\n"
+        "Antworte nur, wenn eine Antwort im Kontext des Chats sinnvoll, hilfreich oder lustig ist.\n"
+        "Wenn keine Antwort sinnvoll ist, antworte exakt mit NO_RESPONSE und sonst nichts.\n"
+        "Wenn du antwortest, halte dich kurz und schreibe direkt die Chatnachricht ohne Prefix.\n\n"
+        "Chatverlauf:\n");
+
+    for (int i = 0; i < history_count; i++) {
+        strncat(out, history[i], cap - strlen(out) - 1);
+        strncat(out, "\n", cap - strlen(out) - 1);
+    }
+}
+
+static int run_ollama_prompt(const char *model, const char *prompt, char *out, size_t cap) {
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        execlp("ollama", "ollama", "run", model, prompt, (char *)NULL);
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+    size_t used = 0;
+    while (used + 1 < cap) {
+        ssize_t n = read(pipefd[0], out + used, cap - used - 1);
+        if (n > 0) {
+            used += (size_t)n;
+            continue;
+        }
+        if (n == 0) break;
+        if (errno == EINTR) continue;
+        break;
+    }
+    close(pipefd[0]);
+    out[used] = '\0';
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    trim_whitespace(out);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return -1;
+    return 0;
+}
+
+static int is_no_ai_response(const char *response) {
+    return response[0] == '\0' ||
+           strcmp(response, "NO_RESPONSE") == 0 ||
+           strcmp(response, "\"NO_RESPONSE\"") == 0 ||
+           strcmp(response, "'NO_RESPONSE'") == 0;
+}
+
+static int send_ai_response(const char *response) {
+    char msg[MAX_BODY_LEN + 1];
+    snprintf(msg, sizeof(msg), "%s %.*s", AI_CONTROL,
+             MAX_BODY_LEN - (int)strlen(AI_CONTROL) - 1, response);
+    return send_text(msg, strlen(msg));
+}
+
+static int run_ai_slop(void) {
+    char model[128];
+    if (choose_ollama_model(model, sizeof(model)) != 0) return 1;
+
+    int fd = connect_server(1);
+    if (fd < 0) return 1;
+    sock_fd = fd;
+
+    printf("connected ai-slop to %s using %s\n", socket_path, model);
+    printf("listening for new chat messages. press Ctrl-C to stop.\n");
+    fflush(stdout);
+
+    char history[AI_CONTEXT_MESSAGES][MAX_MSG_LEN + 1];
+    int history_count = 0;
+    int live = 0;
+
+    while (1) {
+        char frame[MAX_MSG_LEN + 1];
+        if (recv_frame_blocking(sock_fd, frame, sizeof(frame)) != 0) {
+            fprintf(stderr, "ai-slop disconnected from localchatd\n");
+            close_server_connection();
+            return 1;
+        }
+
+        if (strcmp(frame, "[system] welcome to localchat") == 0) {
+            live = 1;
+            continue;
+        }
+        if (strncmp(frame, TYPING_EVENT_PREFIX, strlen(TYPING_EVENT_PREFIX)) == 0) {
+            continue;
+        }
+
+        char tmp[MAX_MSG_LEN + 1];
+        snprintf(tmp, sizeof(tmp), "%s", frame);
+        ParsedLine parsed = parse_chat_line(tmp);
+        if (!parsed.is_chat || strcmp(parsed.name, AI_USERNAME) == 0) {
+            continue;
+        }
+
+        ai_history_add(history, &history_count, frame);
+        if (!live) continue;
+
+        char prompt[32768];
+        char response[AI_RESPONSE_LIMIT + 1];
+        build_ai_prompt(prompt, sizeof(prompt), history, history_count);
+        printf("ai-slop thinking about %s...\n", parsed.name);
+        fflush(stdout);
+        if (run_ollama_prompt(model, prompt, response, sizeof(response)) != 0) {
+            fprintf(stderr, "ollama generation failed\n");
+            continue;
+        }
+        if (is_no_ai_response(response)) continue;
+
+        if (send_ai_response(response) != 0) {
+            fprintf(stderr, "failed to send ai-slop response\n");
+            close_server_connection();
+            return 1;
+        }
+    }
+}
+
 static int fetch_remote_version(char *out, size_t cap) {
     const char *cmd =
         "curl -fsSL " REMOTE_CLIENT_URL " 2>/dev/null | "
@@ -1602,7 +1868,8 @@ static int is_command(const char *arg) {
            strcmp(arg, "stop") == 0 ||
            strcmp(arg, "restart") == 0 ||
            strcmp(arg, "logs") == 0 ||
-           strcmp(arg, "uninstall") == 0;
+           strcmp(arg, "uninstall") == 0 ||
+           strcmp(arg, "ai-slop") == 0;
 }
 
 static int parse_color_mode(const char *value) {
@@ -1723,6 +1990,7 @@ int main(int argc, char **argv) {
         if (strcmp(command, "restart") == 0) return run_service_command("restart", 1);
         if (strcmp(command, "logs") == 0) return run_logs(logs_follow);
         if (strcmp(command, "uninstall") == 0) return run_uninstall();
+        if (strcmp(command, "ai-slop") == 0) return run_ai_slop();
     }
 
     setlocale(LC_ALL, "");
