@@ -1,3 +1,5 @@
+**DISCLAIMER: THIS PROJECT IS 100% VIBECODED**
+
 # localchat
 
 localchat is a small terminal chat for multi-user Unix systems. On Linux, a
